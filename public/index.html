@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MailCheck — Cold-Email Dashboard</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="/vendor/chart.js"></script>
+</head>
+<body>
+  <div class="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-dot"></span> MailCheck
+    </div>
+    <ul class="nav-links">
+      <li><a href="/" class="active">📊 Overview</a></li>
+      <li><a href="/campaigns.html">🚀 Campaigns</a></li>
+      <li><a href="/mailboxes.html">📬 Mailboxes & Warm-up</a></li>
+      <li><a href="/verifier.html">🛡️ Email Verifier</a></li>
+      <li><a href="/replies.html">💬 Replies Inbox</a></li>
+      <li><a href="/suppression.html">🚫 Suppression List</a></li>
+      <li><a href="/settings.html">⚙️ Settings</a></li>
+    </ul>
+    <div class="sidebar-footer">
+      Self-hosted on localhost:3000
+    </div>
+  </div>
+
+  <div class="main-content">
+    <div id="bannerContainer" class="banner-container"></div>
+
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Analytics & Overview</h1>
+        <p class="page-desc">Delivery metrics, engagement rates, and recent activity.</p>
+      </div>
+      <div>
+        <select id="dateFilter" class="btn btn-secondary" onchange="loadOverview()">
+          <option value="7">Last 7 Days</option>
+          <option value="14">Last 14 Days</option>
+          <option value="30" selected>Last 30 Days</option>
+          <option value="all">All Time</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- KPI Metric Cards -->
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Emails Sent</div>
+        <div class="kpi-value" id="kpiSent">0</div>
+        <div class="kpi-sub" id="kpiDelivered">0 delivered</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Unique Opens</div>
+        <div class="kpi-value" id="kpiOpenRate">0%</div>
+        <div class="kpi-sub"><span id="kpiOpens">0</span> unique opens*</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Likely Real Opens</div>
+        <div class="kpi-value" id="kpiRealOpenRate">0%</div>
+        <div class="kpi-sub"><span id="kpiRealOpens">0</span> non-bot opens*</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Click Rate</div>
+        <div class="kpi-value" id="kpiClickRate">0%</div>
+        <div class="kpi-sub"><span id="kpiClicks">0</span> clicks</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Reply Rate</div>
+        <div class="kpi-value" id="kpiReplyRate">0%</div>
+        <div class="kpi-sub"><span id="kpiReplies">0</span> replies</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Bounce Rate</div>
+        <div class="kpi-value" id="kpiBounceRate">0%</div>
+        <div class="kpi-sub"><span id="kpiBounces">0</span> bounces</div>
+      </div>
+    </div>
+
+    <div style="font-size: 11px; color: var(--text-muted); margin-top: -12px; margin-bottom: 24px;">
+      * Open rates are statistical estimates due to privacy protections (Apple Mail Privacy Protection, Google Image Proxy) and automated mail scanning.
+    </div>
+
+    <!-- Activity Chart -->
+    <div class="card">
+      <div class="card-title">Activity Timeline</div>
+      <canvas id="timelineChart" style="width: 100%; height: 260px;"></canvas>
+    </div>
+
+    <!-- Active Campaigns Summary -->
+    <div class="card">
+      <div class="card-title">
+        <span>Active Campaigns</span>
+        <a href="/campaigns.html" class="btn btn-secondary btn-sm">View All</a>
+      </div>
+      <div class="table-responsive">
+        <table>
+          <thead>
+            <tr>
+              <th>Campaign</th>
+              <th>Status</th>
+              <th>Leads</th>
+              <th>Sent</th>
+              <th>Open %</th>
+              <th>Reply %</th>
+              <th>Bounce %</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="campaignsTableBody">
+            <tr><td colspan="8" style="text-align:center; color: var(--text-muted);">Loading campaigns...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let timelineChart = null;
+
+    async function checkSystemStatus() {
+      try {
+        const res = await fetch('/api/system/status');
+        const data = await res.json();
+        const container = document.getElementById('bannerContainer');
+        container.innerHTML = '';
+
+        if (!data.port25.available) {
+          container.innerHTML += `
+            <div class="banner banner-warning">
+              <span>⚠️ <strong>Port 25 Outbound Blocked:</strong> Direct SMTP mailbox probe is blocked by your ISP or firewall. Email verification will mark SMTP checks as "unknown" without failing.</span>
+            </div>
+          `;
+        }
+
+        if (data.publicServer.warning) {
+          container.innerHTML += `
+            <div class="banner banner-warning">
+              <span>⚠️ <strong>Public Base URL Unset:</strong> ${data.publicServer.warning} Configure <code>PUBLIC_BASE_URL</code> in <a href="/settings.html" style="color:inherit; text-decoration:underline;">Settings</a>.</span>
+            </div>
+          `;
+        }
+
+        if (data.compliance.warning) {
+          container.innerHTML += `
+            <div class="banner banner-danger">
+              <span>🛑 <strong>Compliance Notice:</strong> ${data.compliance.warning} Configure in <a href="/settings.html" style="color:inherit; text-decoration:underline;">Settings</a>.</span>
+            </div>
+          `;
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function loadOverview() {
+      const days = document.getElementById('dateFilter').value;
+      let url = '/api/stats/overview';
+      if (days !== 'all') {
+        const fromDate = new Date(Date.now() - parseInt(days) * 86400000).toISOString();
+        url += `?from=${encodeURIComponent(fromDate)}`;
+      }
+
+      try {
+        const res = await fetch(url);
+        const data = await res.json();
+
+        // Update KPIs
+        document.getElementById('kpiSent').textContent = data.totals.sent.toLocaleString();
+        document.getElementById('kpiDelivered').textContent = `${data.totals.delivered.toLocaleString()} delivered`;
+        document.getElementById('kpiOpenRate').textContent = `${data.rates.openRate}%`;
+        document.getElementById('kpiOpens').textContent = data.totals.uniqueOpens.toLocaleString();
+        document.getElementById('kpiRealOpenRate').textContent = `${data.rates.likelyRealOpenRate}%`;
+        document.getElementById('kpiRealOpens').textContent = data.totals.likelyRealOpens.toLocaleString();
+        document.getElementById('kpiClickRate').textContent = `${data.rates.clickRate}%`;
+        document.getElementById('kpiClicks').textContent = data.totals.clicked.toLocaleString();
+        document.getElementById('kpiReplyRate').textContent = `${data.rates.replyRate}%`;
+        document.getElementById('kpiReplies').textContent = data.totals.replied.toLocaleString();
+        document.getElementById('kpiBounceRate').textContent = `${data.rates.bounceRate}%`;
+        document.getElementById('kpiBounces').textContent = data.totals.bounced.toLocaleString();
+
+        // Update Timeline Chart
+        const labels = data.timeline.map(t => t.day);
+        const sentData = data.timeline.map(t => t.sent);
+        const openedData = data.timeline.map(t => t.opened);
+        const repliedData = data.timeline.map(t => t.replied);
+
+        if (timelineChart) timelineChart.destroy();
+        timelineChart = new Chart('timelineChart', {
+          data: {
+            labels,
+            datasets: [
+              { label: 'Sent', data: sentData, borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.1)' },
+              { label: 'Opened', data: openedData, borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.1)' },
+              { label: 'Replied', data: repliedData, borderColor: '#8b5cf6', backgroundColor: 'rgba(139, 92, 246, 0.1)' }
+            ]
+          }
+        });
+
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function loadCampaigns() {
+      try {
+        const res = await fetch('/api/campaigns');
+        const campaigns = await res.json();
+        const tbody = document.getElementById('campaignsTableBody');
+        tbody.innerHTML = '';
+
+        if (campaigns.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color: var(--text-muted);">No campaigns created yet.</td></tr>';
+          return;
+        }
+
+        for (const c of campaigns) {
+          const statsRes = await fetch(`/api/campaigns/${c.id}/stats`);
+          const s = await statsRes.json();
+
+          tbody.innerHTML += `
+            <tr>
+              <td><strong><a href="/campaign-detail.html?id=${c.id}" style="color:var(--text-primary); text-decoration:none;">${c.name}</a></strong></td>
+              <td><span class="badge badge-${c.status}">${c.status}</span></td>
+              <td>${s.leads.toLocaleString()}</td>
+              <td>${s.sent.toLocaleString()}</td>
+              <td>${s.rates.openRate}%</td>
+              <td>${s.rates.replyRate}%</td>
+              <td>${s.rates.bounceRate}%</td>
+              <td>
+                <a href="/campaign-detail.html?id=${c.id}" class="btn btn-secondary btn-sm">Details</a>
+              </td>
+            </tr>
+          `;
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    checkSystemStatus();
+    loadOverview();
+    loadCampaigns();
+  </script>
+</body>
+</html>

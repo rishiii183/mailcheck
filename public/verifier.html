@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MailCheck — Email Verifier</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-dot"></span> MailCheck
+    </div>
+    <ul class="nav-links">
+      <li><a href="/">📊 Overview</a></li>
+      <li><a href="/campaigns.html">🚀 Campaigns</a></li>
+      <li><a href="/mailboxes.html">📬 Mailboxes & Warm-up</a></li>
+      <li><a href="/verifier.html" class="active">🛡️ Email Verifier</a></li>
+      <li><a href="/replies.html">💬 Replies Inbox</a></li>
+      <li><a href="/suppression.html">🚫 Suppression List</a></li>
+      <li><a href="/settings.html">⚙️ Settings</a></li>
+    </ul>
+    <div class="sidebar-footer">
+      Self-hosted on localhost:3000
+    </div>
+  </div>
+
+  <div class="main-content">
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Email Verification</h1>
+        <p class="page-desc">RFC 5322 syntax, typos, disposable domains, MX records, port 25 SMTP handshake, catch-all & greylisting.</p>
+      </div>
+    </div>
+
+    <!-- Tabs: Single check & Bulk list -->
+    <div style="display: flex; gap: 8px; margin-bottom: 20px;">
+      <button id="tabSingleBtn" class="btn btn-primary" onclick="showTab('single')">Single Check</button>
+      <button id="tabBulkBtn" class="btn btn-secondary" onclick="showTab('bulk')">Bulk Verification</button>
+    </div>
+
+    <!-- Single Verification Tab -->
+    <div id="tabSingle" class="card">
+      <div class="card-title">Single Email Verification</div>
+      <div style="display: flex; gap: 12px; margin-bottom: 20px;">
+        <input type="email" id="singleEmailInput" placeholder="name@company.com" style="flex: 1;" onkeydown="if(event.key==='Enter') verifySingle()">
+        <button class="btn btn-primary" onclick="verifySingle()" id="btnVerifySingle">Verify Email</button>
+      </div>
+
+      <div id="singleResultContainer" style="display: none;">
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px; background: rgba(15, 23, 42, 0.6); border-radius: 8px; margin-bottom: 20px;">
+          <div>
+            <div style="font-size: 18px; font-weight: 700;" id="singleResultEmail">user@example.com</div>
+            <div style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;" id="singleResultReason">Verdict reason</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 16px;">
+            <div style="text-align: right;">
+              <div style="font-size: 11px; text-transform: uppercase; color: var(--text-secondary);">Quality Score</div>
+              <div style="font-size: 22px; font-weight: 700;" id="singleResultScore">100/100</div>
+            </div>
+            <div id="singleResultBadge" class="badge badge-deliverable" style="font-size: 14px; padding: 6px 14px;">DELIVERABLE</div>
+          </div>
+        </div>
+
+        <div id="singleSuggestionNotice" style="display: none; margin-bottom: 16px;" class="banner banner-warning">
+          <span>💡 <strong>Did you mean:</strong> <span id="singleSuggestionText"></span>?</span>
+        </div>
+
+        <!-- Pipeline Checks Table -->
+        <h3 style="font-size: 14px; margin-bottom: 10px;">Pipeline Checks</h3>
+        <div class="table-responsive" style="margin-bottom: 20px;">
+          <table>
+            <thead>
+              <tr>
+                <th>Check</th>
+                <th>Status</th>
+                <th>Detail</th>
+              </tr>
+            </thead>
+            <tbody id="singleChecksTable"></tbody>
+          </table>
+        </div>
+
+        <!-- Transcript -->
+        <h3 style="font-size: 14px; margin-bottom: 10px;">SMTP Conversation Transcript</h3>
+        <div id="singleTranscript" style="background: #090d16; padding: 14px; border-radius: 6px; font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto; color: #a5b4fc; white-space: pre-wrap;"></div>
+      </div>
+    </div>
+
+    <!-- Bulk Verification Tab -->
+    <div id="tabBulk" class="card" style="display: none;">
+      <div class="card-title">Bulk List Verification</div>
+      <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">
+        Upload a CSV/TXT file or paste email addresses (one per line, comma or semicolon separated). Duplicates are automatically removed.
+      </p>
+
+      <div class="form-group">
+        <label>Paste Emails</label>
+        <textarea id="bulkPasteInput" rows="6" placeholder="alex@company.com&#10;sarah@enterprise.io&#10;John Doe <john@gmail.com>"></textarea>
+      </div>
+
+      <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 20px;">
+        <label class="btn btn-secondary" style="margin: 0; cursor: pointer;">
+          📁 Choose File (CSV / TXT)
+          <input type="file" id="bulkFileInput" accept=".csv,.txt" style="display: none;" onchange="handleBulkFile(event)">
+        </label>
+        <span id="bulkFileChosen" style="font-size: 12px; color: var(--text-muted);">No file selected</span>
+        <button class="btn btn-primary" onclick="startBulkVerification()" id="btnStartBulk" style="margin-left: auto;">Start Verification</button>
+      </div>
+
+      <!-- Live Progress Bar -->
+      <div id="bulkProgressContainer" style="display: none; margin-bottom: 24px;">
+        <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px;">
+          <span id="bulkProgressLabel">Verifying...</span>
+          <span id="bulkProgressPercent">0%</span>
+        </div>
+        <div style="width: 100%; height: 8px; background: #090d16; border-radius: 4px; overflow: hidden;">
+          <div id="bulkProgressBar" style="width: 0%; height: 100%; background: var(--primary); transition: width 0.2s;"></div>
+        </div>
+      </div>
+
+      <!-- Bulk Summary & Export -->
+      <div id="bulkResultsContainer" style="display: none;">
+        <div class="kpi-grid" style="margin-bottom: 18px;">
+          <div class="kpi-card">
+            <div class="kpi-label">Total Verified</div>
+            <div class="kpi-value" id="bulkTotal">0</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Deliverable</div>
+            <div class="kpi-value" style="color: #34d399;" id="bulkDeliverable">0</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Risky</div>
+            <div class="kpi-value" style="color: #fbbf24;" id="bulkRisky">0</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Undeliverable</div>
+            <div class="kpi-value" style="color: #f87171;" id="bulkUndeliverable">0</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Unknown</div>
+            <div class="kpi-value" style="color: #94a3b8;" id="bulkUnknown">0</div>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 8px; margin-bottom: 16px;">
+          <button class="btn btn-secondary btn-sm" onclick="exportBulkCsv('all')">Export All (.CSV)</button>
+          <button class="btn btn-secondary btn-sm" onclick="exportBulkCsv('deliverable')">Export Deliverable Only</button>
+          <button class="btn btn-secondary btn-sm" onclick="exportBulkCsv('deliverable_and_risky')">Export Deliverable + Risky</button>
+        </div>
+
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Verdict</th>
+                <th>Score</th>
+                <th>Reason</th>
+                <th>Suggestion</th>
+              </tr>
+            </thead>
+            <tbody id="bulkResultsTable"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let bulkResultsData = [];
+
+    function showTab(tab) {
+      document.getElementById('tabSingle').style.display = tab === 'single' ? 'block' : 'none';
+      document.getElementById('tabBulk').style.display = tab === 'bulk' ? 'block' : 'none';
+      document.getElementById('tabSingleBtn').className = tab === 'single' ? 'btn btn-primary' : 'btn btn-secondary';
+      document.getElementById('tabBulkBtn').className = tab === 'bulk' ? 'btn btn-primary' : 'btn btn-secondary';
+    }
+
+    async function verifySingle() {
+      const email = document.getElementById('singleEmailInput').value.trim();
+      if (!email) return;
+
+      const btn = document.getElementById('btnVerifySingle');
+      btn.textContent = 'Verifying...';
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email })
+        });
+        const data = await res.json();
+
+        document.getElementById('singleResultContainer').style.display = 'block';
+        document.getElementById('singleResultEmail').textContent = data.email;
+        document.getElementById('singleResultReason').textContent = data.reason;
+        document.getElementById('singleResultScore').textContent = `${data.score}/100`;
+
+        const badge = document.getElementById('singleResultBadge');
+        badge.className = `badge badge-${data.verdict}`;
+        badge.textContent = data.verdict.toUpperCase();
+
+        if (data.suggestion) {
+          document.getElementById('singleSuggestionNotice').style.display = 'block';
+          document.getElementById('singleSuggestionText').textContent = data.suggestion;
+        } else {
+          document.getElementById('singleSuggestionNotice').style.display = 'none';
+        }
+
+        const tbody = document.getElementById('singleChecksTable');
+        tbody.innerHTML = '';
+        for (const c of data.checks) {
+          tbody.innerHTML += `
+            <tr>
+              <td><strong>${c.name.toUpperCase()}</strong></td>
+              <td><span class="badge badge-${c.status}">${c.status.toUpperCase()}</span></td>
+              <td>${c.detail}</td>
+            </tr>
+          `;
+        }
+
+        const transcriptEl = document.getElementById('singleTranscript');
+        transcriptEl.textContent = (data.transcript && data.transcript.length > 0)
+          ? data.transcript.join('\n')
+          : '[No SMTP transcript available for this check]';
+
+      } catch (err) {
+        alert('Verification error: ' + err.message);
+      } finally {
+        btn.textContent = 'Verify Email';
+        btn.disabled = false;
+      }
+    }
+
+    function handleBulkFile(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      document.getElementById('bulkFileChosen').textContent = file.name;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        document.getElementById('bulkPasteInput').value = e.target.result;
+      };
+      reader.readAsText(file);
+    }
+
+    async function startBulkVerification() {
+      const text = document.getElementById('bulkPasteInput').value.trim();
+      if (!text) {
+        alert('Please paste emails or upload a file first.');
+        return;
+      }
+
+      const btn = document.getElementById('btnStartBulk');
+      btn.disabled = true;
+      btn.textContent = 'Processing...';
+
+      document.getElementById('bulkProgressContainer').style.display = 'block';
+      document.getElementById('bulkResultsContainer').style.display = 'none';
+
+      try {
+        const res = await fetch('/api/verify/bulk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ emails: text })
+        });
+        const data = await res.json();
+        bulkResultsData = data.results || [];
+
+        // Update Summary
+        document.getElementById('bulkTotal').textContent = data.total;
+        document.getElementById('bulkDeliverable').textContent = data.summary.deliverable;
+        document.getElementById('bulkRisky').textContent = data.summary.risky;
+        document.getElementById('bulkUndeliverable').textContent = data.summary.undeliverable;
+        document.getElementById('bulkUnknown').textContent = data.summary.unknown;
+
+        // Populate Table
+        const tbody = document.getElementById('bulkResultsTable');
+        tbody.innerHTML = '';
+        for (const item of bulkResultsData) {
+          tbody.innerHTML += `
+            <tr>
+              <td><strong>${item.email}</strong></td>
+              <td><span class="badge badge-${item.verdict}">${item.verdict}</span></td>
+              <td>${item.score}</td>
+              <td style="color:var(--text-secondary);">${item.reason}</td>
+              <td>${item.suggestion || '—'}</td>
+            </tr>
+          `;
+        }
+
+        document.getElementById('bulkProgressBar').style.width = '100%';
+        document.getElementById('bulkProgressPercent').textContent = '100%';
+        document.getElementById('bulkProgressLabel').textContent = 'Completed';
+        document.getElementById('bulkResultsContainer').style.display = 'block';
+
+      } catch (err) {
+        alert('Bulk verification error: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Start Verification';
+      }
+    }
+
+    function exportBulkCsv(filter) {
+      if (!bulkResultsData || bulkResultsData.length === 0) return;
+
+      let filtered = bulkResultsData;
+      if (filter === 'deliverable') {
+        filtered = bulkResultsData.filter(r => r.verdict === 'deliverable');
+      } else if (filter === 'deliverable_and_risky') {
+        filtered = bulkResultsData.filter(r => ['deliverable', 'risky'].includes(r.verdict));
+      }
+
+      const headers = ['Email', 'Verdict', 'Score', 'Reason', 'Suggestion'];
+      const rows = filtered.map(r => [
+        `"${r.email}"`,
+        `"${r.verdict}"`,
+        r.score,
+        `"${(r.reason || '').replace(/"/g, '""')}"`,
+        `"${(r.suggestion || '').replace(/"/g, '""')}"`
+      ]);
+
+      const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement('a');
+      link.setAttribute('href', encodedUri);
+      link.setAttribute('download', `mailcheck-verification-${filter}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  </script>
+</body>
+</html>

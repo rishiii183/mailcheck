@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MailCheck — Replies Inbox</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-dot"></span> MailCheck
+    </div>
+    <ul class="nav-links">
+      <li><a href="/">📊 Overview</a></li>
+      <li><a href="/campaigns.html">🚀 Campaigns</a></li>
+      <li><a href="/mailboxes.html">📬 Mailboxes & Warm-up</a></li>
+      <li><a href="/verifier.html">🛡️ Email Verifier</a></li>
+      <li><a href="/replies.html" class="active">💬 Replies Inbox</a></li>
+      <li><a href="/suppression.html">🚫 Suppression List</a></li>
+      <li><a href="/settings.html">⚙️ Settings</a></li>
+    </ul>
+    <div class="sidebar-footer">Self-hosted on localhost:3000</div>
+  </div>
+
+  <div class="main-content">
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Replies Inbox</h1>
+        <p class="page-desc">All incoming replies across your campaigns. Label sentiment and track sales responses.</p>
+      </div>
+      <div>
+        <select id="handledFilter" class="btn btn-secondary" onchange="loadReplies()">
+          <option value="unhandled" selected>Unhandled Only</option>
+          <option value="all">All Replies</option>
+          <option value="handled">Handled Only</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Sentiment Filter Pills -->
+    <div style="display:flex; gap:8px; margin-bottom: 20px;">
+      <button class="btn btn-primary btn-sm label-filter" onclick="filterByLabel('all', this)">All Sentiments</button>
+      <button class="btn btn-secondary btn-sm label-filter" onclick="filterByLabel('interested', this)">Interested 🌟</button>
+      <button class="btn btn-secondary btn-sm label-filter" onclick="filterByLabel('neutral', this)">Neutral 💬</button>
+      <button class="btn btn-secondary btn-sm label-filter" onclick="filterByLabel('not_interested', this)">Not Interested ❌</button>
+    </div>
+
+    <!-- Replies List -->
+    <div class="card">
+      <div id="repliesContainer" style="display:flex; flex-direction:column; gap:16px;">
+        <span style="color:var(--text-muted); text-align:center;">Loading replies...</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentLabel = 'all';
+
+    async function loadReplies() {
+      const handled = document.getElementById('handledFilter').value;
+      let url = '/api/replies?';
+      if (handled === 'unhandled') url += 'handled=0&';
+      if (handled === 'handled') url += 'handled=1&';
+      if (currentLabel !== 'all') url += `label=${currentLabel}&`;
+
+      try {
+        const res = await fetch(url);
+        const data = await res.json();
+        const container = document.getElementById('repliesContainer');
+        container.innerHTML = '';
+
+        if (!data.items || data.items.length === 0) {
+          container.innerHTML = '<span style="color:var(--text-muted); text-align:center; padding:20px;">No replies found for this filter.</span>';
+          return;
+        }
+
+        for (const r of data.items) {
+          let labelBadge = '<span class="badge badge-neutral">NEUTRAL</span>';
+          if (r.label === 'interested') labelBadge = '<span class="badge badge-deliverable">INTERESTED</span>';
+          if (r.label === 'not_interested') labelBadge = '<span class="badge badge-undeliverable">NOT INTERESTED</span>';
+
+          container.innerHTML += `
+            <div style="padding:18px; background:#090d16; border-radius:8px; border:1px solid var(--border);">
+              <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
+                <div>
+                  <div style="font-size:15px; font-weight:700;">${r.from_email}</div>
+                  <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">
+                    Campaign: <strong>${r.campaign_name || 'Direct'}</strong> • Received: ${r.received_at}
+                  </div>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                  ${labelBadge}
+                  ${r.is_auto_reply ? '<span class="badge badge-warn">AUTO-REPLY</span>' : ''}
+                  <button class="btn btn-secondary btn-sm" onclick="toggleHandled(${r.id}, ${r.handled ? 0 : 1})">
+                    ${r.handled ? '✓ Mark Unhandled' : 'Mark Handled'}
+                  </button>
+                </div>
+              </div>
+
+              <div style="font-size:13px; font-weight:600; margin-bottom:6px; color:#fff;">Subject: ${r.subject || '(no subject)'}</div>
+              <div style="font-size:13px; color:var(--text-primary); line-height:1.6; background:rgba(30,41,59,0.5); padding:12px; border-radius:6px; margin-bottom:12px; white-space:pre-wrap;">${r.body_text || r.snippet || ''}</div>
+
+              <div style="display:flex; gap:6px; align-items:center;">
+                <span style="font-size:12px; color:var(--text-secondary); margin-right:4px;">Set Sentiment:</span>
+                <button class="btn btn-secondary btn-sm" onclick="setLabel(${r.id}, 'interested')">🌟 Interested</button>
+                <button class="btn btn-secondary btn-sm" onclick="setLabel(${r.id}, 'neutral')">💬 Neutral</button>
+                <button class="btn btn-secondary btn-sm" onclick="setLabel(${r.id}, 'not_interested')">❌ Not Interested</button>
+              </div>
+            </div>
+          `;
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function filterByLabel(label, btn) {
+      currentLabel = label;
+      document.querySelectorAll('.label-filter').forEach(b => b.className = 'btn btn-secondary btn-sm label-filter');
+      btn.className = 'btn btn-primary btn-sm label-filter';
+      loadReplies();
+    }
+
+    async function setLabel(id, label) {
+      await fetch(`/api/replies/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label })
+      });
+      loadReplies();
+    }
+
+    async function toggleHandled(id, handled) {
+      await fetch(`/api/replies/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ handled })
+      });
+      loadReplies();
+    }
+
+    loadReplies();
+  </script>
+</body>
+</html>

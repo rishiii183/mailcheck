@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MailCheck — Campaigns</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-dot"></span> MailCheck
+    </div>
+    <ul class="nav-links">
+      <li><a href="/">📊 Overview</a></li>
+      <li><a href="/campaigns.html" class="active">🚀 Campaigns</a></li>
+      <li><a href="/mailboxes.html">📬 Mailboxes & Warm-up</a></li>
+      <li><a href="/verifier.html">🛡️ Email Verifier</a></li>
+      <li><a href="/replies.html">💬 Replies Inbox</a></li>
+      <li><a href="/suppression.html">🚫 Suppression List</a></li>
+      <li><a href="/settings.html">⚙️ Settings</a></li>
+    </ul>
+    <div class="sidebar-footer">Self-hosted on localhost:3000</div>
+  </div>
+
+  <div class="main-content">
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Outreach Campaigns</h1>
+        <p class="page-desc">Multi-step cold outreach sequences with A/B testing, mailbox rotation, and automated reply stopping.</p>
+      </div>
+      <div>
+        <button class="btn btn-primary" onclick="openNewCampaignModal()">+ Create Campaign</button>
+      </div>
+    </div>
+
+    <!-- Campaigns List Table -->
+    <div class="card">
+      <div class="table-responsive">
+        <table>
+          <thead>
+            <tr>
+              <th>Campaign Name</th>
+              <th>Status</th>
+              <th>Leads</th>
+              <th>Sent</th>
+              <th>Open %</th>
+              <th>Reply %</th>
+              <th>Bounce %</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="campaignsTbody">
+            <tr><td colspan="8" style="text-align: center; color: var(--text-muted);">Loading campaigns...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- New Campaign Modal -->
+  <div class="modal-overlay" id="campaignModal">
+    <div class="modal" style="max-width: 720px;">
+      <div class="modal-header">
+        <div class="modal-title" id="modalCampaignTitle">Create New Campaign</div>
+        <button class="modal-close" onclick="closeCampaignModal()">&times;</button>
+      </div>
+
+      <form id="campaignForm" onsubmit="saveCampaign(event)">
+        <div class="form-group">
+          <label>Campaign Name *</label>
+          <input type="text" id="campName" required placeholder="e.g. Q1 SaaS Outbound">
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+          <div class="form-group">
+            <label>Select Lead List *</label>
+            <select id="campListId" required>
+              <option value="">-- Choose a list --</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Send Policy</label>
+            <select id="campSendPolicy">
+              <option value="deliverable_only" selected>Only send to Deliverable (Safest)</option>
+              <option value="deliverable_and_risky">Deliverable + Risky</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Sending Mailboxes (Rotated round-robin)</label>
+          <div id="mailboxCheckboxes" style="display: flex; flex-direction: column; gap: 6px; padding: 10px; background: #090d16; border-radius: 6px; border: 1px solid var(--border); max-height: 120px; overflow-y: auto;">
+            <span style="color: var(--text-muted); font-size: 12px;">Loading mailboxes...</span>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px;">
+          <div class="form-group">
+            <label>Timezone</label>
+            <input type="text" id="campTimezone" value="UTC">
+          </div>
+          <div class="form-group">
+            <label>Send Window Start</label>
+            <input type="text" id="campWindowStart" value="09:00">
+          </div>
+          <div class="form-group">
+            <label>Send Window End</label>
+            <input type="text" id="campWindowEnd" value="17:00">
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px;">
+          <div class="form-group">
+            <label>Daily Cap / Mailbox</label>
+            <input type="number" id="campDailyCap" value="50">
+          </div>
+          <div class="form-group">
+            <label>Min Gap (seconds)</label>
+            <input type="number" id="campMinGap" value="90">
+          </div>
+          <div class="form-group">
+            <label>Max Gap (seconds)</label>
+            <input type="number" id="campMaxGap" value="240">
+          </div>
+        </div>
+
+        <!-- Sequence Step 1 -->
+        <div style="background: rgba(15, 23, 42, 0.5); padding: 16px; border-radius: 8px; border: 1px solid var(--border); margin-top: 14px;">
+          <h3 style="font-size: 14px; margin-bottom: 12px;">Sequence Step 1 (Initial Email)</h3>
+          
+          <div class="form-group">
+            <label>Subject Line (Supports spintax {Hi|Hello} and variables {{first_name|there}})</label>
+            <input type="text" id="step1Subject" required value="Quick question about {{company|your team}}">
+          </div>
+
+          <div class="form-group">
+            <label>Email Body (HTML)</label>
+            <textarea id="step1Body" rows="5" required><p>Hi {{first_name|there}},</p><p>{I noticed your work at|I came across} {{company|your company}} and wanted to reach out.</p><p>Would you be open to a 5-minute chat this week?</p><p>Best,<br>Outreach Team</p></textarea>
+          </div>
+        </div>
+
+        <!-- Sequence Step 2 (Follow-up) -->
+        <div style="background: rgba(15, 23, 42, 0.5); padding: 16px; border-radius: 8px; border: 1px solid var(--border); margin-top: 14px;">
+          <h3 style="font-size: 14px; margin-bottom: 12px;">Sequence Step 2 (Follow-up Thread)</h3>
+          
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+            <div class="form-group">
+              <label>Delay Days (after Step 1)</label>
+              <input type="number" id="step2Delay" value="3">
+            </div>
+            <div class="form-group">
+              <label>Sending Condition</label>
+              <select id="step2Condition">
+                <option value="if_no_reply" selected>Send only if no reply</option>
+                <option value="always">Always send</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Follow-up Body (Follows up in same email thread)</label>
+            <textarea id="step2Body" rows="4"><p>Hi {{first_name|there}},</p><p>Following up on my note below—any interest in connecting briefly?</p></textarea>
+          </div>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
+          <button type="button" class="btn btn-secondary" onclick="closeCampaignModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btnSaveCampaign">Create Campaign</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    let mailboxesList = [];
+    let leadLists = [];
+
+    async function loadCampaigns() {
+      try {
+        const res = await fetch('/api/campaigns');
+        const campaigns = await res.json();
+        const tbody = document.getElementById('campaignsTbody');
+        tbody.innerHTML = '';
+
+        if (campaigns.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color: var(--text-muted);">No campaigns found. Create your first campaign above.</td></tr>';
+          return;
+        }
+
+        for (const c of campaigns) {
+          const statsRes = await fetch(`/api/campaigns/${c.id}/stats`);
+          const s = await statsRes.json();
+
+          let actionButtons = '';
+          if (c.status === 'draft' || c.status === 'paused') {
+            actionButtons += `<button class="btn btn-primary btn-sm" onclick="launchCampaign(${c.id})">${c.status === 'draft' ? 'Launch' : 'Resume'}</button> `;
+          } else if (c.status === 'running') {
+            actionButtons += `<button class="btn btn-secondary btn-sm" onclick="pauseCampaign(${c.id})">Pause</button> `;
+          }
+
+          actionButtons += `
+            <a href="/campaign-detail.html?id=${c.id}" class="btn btn-secondary btn-sm">Detail</a>
+            <button class="btn btn-secondary btn-sm" onclick="duplicateCampaign(${c.id})">Duplicate</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteCampaign(${c.id})">Delete</button>
+          `;
+
+          tbody.innerHTML += `
+            <tr>
+              <td><strong><a href="/campaign-detail.html?id=${c.id}" style="color:var(--text-primary); text-decoration:none;">${c.name}</a></strong></td>
+              <td><span class="badge badge-${c.status}">${c.status}</span></td>
+              <td>${s.leads.toLocaleString()}</td>
+              <td>${s.sent.toLocaleString()}</td>
+              <td>${s.rates.openRate}%</td>
+              <td>${s.rates.replyRate}%</td>
+              <td>${s.rates.bounceRate}%</td>
+              <td>${actionButtons}</td>
+            </tr>
+          `;
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function loadDependencies() {
+      try {
+        const [mbRes, listsRes] = await Promise.all([
+          fetch('/api/mailboxes'),
+          fetch('/api/lists')
+        ]);
+        mailboxesList = await mbRes.json();
+        leadLists = await listsRes.json();
+
+        // Populate lists dropdown
+        const select = document.getElementById('campListId');
+        select.innerHTML = '<option value="">-- Choose a list --</option>';
+        for (const l of leadLists) {
+          select.innerHTML += `<option value="${l.id}">${l.name} (${l.lead_count} leads)</option>`;
+        }
+
+        // Populate mailbox checkboxes
+        const mbDiv = document.getElementById('mailboxCheckboxes');
+        mbDiv.innerHTML = '';
+        if (mailboxesList.length === 0) {
+          mbDiv.innerHTML = '<span style="color:var(--danger); font-size:12px;">No mailboxes added yet! Add one in Mailboxes & Warm-up.</span>';
+        } else {
+          for (const m of mailboxesList) {
+            mbDiv.innerHTML += `
+              <label style="display:flex; align-items:center; gap:8px; font-size:13px; font-weight:normal; text-transform:none; cursor:pointer;">
+                <input type="checkbox" name="mailboxes" value="${m.id}" checked>
+                ${m.email} (${m.display_name})
+              </label>
+            `;
+          }
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function openNewCampaignModal() {
+      document.getElementById('campaignModal').style.display = 'flex';
+      loadDependencies();
+    }
+
+    function closeCampaignModal() {
+      document.getElementById('campaignModal').style.display = 'none';
+    }
+
+    async function saveCampaign(e) {
+      e.preventDefault();
+      const name = document.getElementById('campName').value.trim();
+      const listId = document.getElementById('campListId').value;
+      const sendPolicy = document.getElementById('campSendPolicy').value;
+      const timezone = document.getElementById('campTimezone').value.trim();
+      const windowStart = document.getElementById('campWindowStart').value.trim();
+      const windowEnd = document.getElementById('campWindowEnd').value.trim();
+      const dailyCap = parseInt(document.getElementById('campDailyCap').value, 10);
+      const minGap = parseInt(document.getElementById('campMinGap').value, 10);
+      const maxGap = parseInt(document.getElementById('campMaxGap').value, 10);
+
+      const checkedMb = Array.from(document.querySelectorAll('input[name="mailboxes"]:checked')).map(cb => parseInt(cb.value, 10));
+      if (checkedMb.length === 0) {
+        alert('Please select at least one sending mailbox.');
+        return;
+      }
+
+      const step1Subject = document.getElementById('step1Subject').value;
+      const step1Body = document.getElementById('step1Body').value;
+      const step2Delay = parseInt(document.getElementById('step2Delay').value, 10);
+      const step2Condition = document.getElementById('step2Condition').value;
+      const step2Body = document.getElementById('step2Body').value;
+
+      const payload = {
+        name,
+        list_id: parseInt(listId, 10),
+        send_policy: sendPolicy,
+        timezone,
+        window_start: windowStart,
+        window_end: windowEnd,
+        daily_cap_per_mailbox: dailyCap,
+        min_gap_seconds: minGap,
+        max_gap_seconds: maxGap,
+        mailbox_ids: checkedMb,
+        steps: [
+          {
+            step_number: 1,
+            delay_days: 0,
+            condition: 'always',
+            variants: [{ variant_letter: 'A', subject: step1Subject, body_html: step1Body }]
+          },
+          {
+            step_number: 2,
+            delay_days: step2Delay,
+            condition: step2Condition,
+            variants: [{ variant_letter: 'A', subject: 'Re: ' + step1Subject, body_html: step2Body }]
+          }
+        ]
+      };
+
+      try {
+        const res = await fetch('/api/campaigns', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          alert('Error: ' + err.error);
+          return;
+        }
+
+        closeCampaignModal();
+        loadCampaigns();
+      } catch (err) {
+        alert('Failed to save campaign: ' + err.message);
+      }
+    }
+
+    async function launchCampaign(id) {
+      if (!confirm('Launch this campaign? Emails will begin scheduling immediately according to your schedule.')) return;
+      try {
+        const res = await fetch(`/api/campaigns/${id}/launch`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) {
+          alert('Failed to launch: ' + data.error);
+          return;
+        }
+        alert(`Campaign launched successfully! ${data.scheduledLeads} leads scheduled for sending.`);
+        loadCampaigns();
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
+
+    async function pauseCampaign(id) {
+      await fetch(`/api/campaigns/${id}/pause`, { method: 'POST' });
+      loadCampaigns();
+    }
+
+    async function duplicateCampaign(id) {
+      await fetch(`/api/campaigns/${id}/duplicate`, { method: 'POST' });
+      loadCampaigns();
+    }
+
+    async function deleteCampaign(id) {
+      if (!confirm('Are you sure you want to permanently delete this campaign?')) return;
+      await fetch(`/api/campaigns/${id}`, { method: 'DELETE' });
+      loadCampaigns();
+    }
+
+    loadCampaigns();
+  </script>
+</body>
+</html>

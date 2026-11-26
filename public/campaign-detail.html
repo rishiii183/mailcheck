@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MailCheck — Campaign Detail</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="/vendor/chart.js"></script>
+</head>
+<body>
+  <div class="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-dot"></span> MailCheck
+    </div>
+    <ul class="nav-links">
+      <li><a href="/">📊 Overview</a></li>
+      <li><a href="/campaigns.html" class="active">🚀 Campaigns</a></li>
+      <li><a href="/mailboxes.html">📬 Mailboxes & Warm-up</a></li>
+      <li><a href="/verifier.html">🛡️ Email Verifier</a></li>
+      <li><a href="/replies.html">💬 Replies Inbox</a></li>
+      <li><a href="/suppression.html">🚫 Suppression List</a></li>
+      <li><a href="/settings.html">⚙️ Settings</a></li>
+    </ul>
+    <div class="sidebar-footer">Self-hosted on localhost:3000</div>
+  </div>
+
+  <div class="main-content">
+    <div class="page-header">
+      <div>
+        <a href="/campaigns.html" style="color:var(--text-secondary); text-decoration:none; font-size:12px;">&larr; Back to Campaigns</a>
+        <h1 class="page-title" id="campDetailTitle" style="margin-top: 4px;">Campaign Details</h1>
+        <p class="page-desc" id="campDetailSub">Status and delivery performance breakdown</p>
+      </div>
+      <div id="campDetailActions" style="display:flex; gap:8px;"></div>
+    </div>
+
+    <!-- Funnel KPI Cards -->
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Total Leads</div>
+        <div class="kpi-value" id="funnelLeads">0</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Delivered</div>
+        <div class="kpi-value" id="funnelDelivered">0</div>
+        <div class="kpi-sub"><span id="funnelSent">0</span> sent</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Unique Opens</div>
+        <div class="kpi-value" id="funnelOpenRate">0%</div>
+        <div class="kpi-sub"><span id="funnelOpens">0</span> opened</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Clicks</div>
+        <div class="kpi-value" id="funnelClickRate">0%</div>
+        <div class="kpi-sub"><span id="funnelClicks">0</span> clicked</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Replies</div>
+        <div class="kpi-value" id="funnelReplyRate">0%</div>
+        <div class="kpi-sub"><span id="funnelReplies">0</span> replied</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Bounces</div>
+        <div class="kpi-value" id="funnelBounceRate">0%</div>
+        <div class="kpi-sub"><span id="funnelBounces">0</span> bounced</div>
+      </div>
+    </div>
+
+    <!-- Sequence Steps Breakdown -->
+    <div class="card">
+      <div class="card-title">Sequence Steps Performance</div>
+      <div class="table-responsive">
+        <table>
+          <thead>
+            <tr>
+              <th>Step #</th>
+              <th>Delay</th>
+              <th>Condition</th>
+              <th>Sent</th>
+              <th>Opened</th>
+              <th>Clicked</th>
+              <th>Replied</th>
+            </tr>
+          </thead>
+          <tbody id="stepsTbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- A/B Variants Comparison & Mailbox Performance -->
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+      <div class="card">
+        <div class="card-title">A/B Subject Variant Comparison</div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Variant</th>
+                <th>Subject</th>
+                <th>Sent</th>
+                <th>Opened</th>
+                <th>Open %</th>
+              </tr>
+            </thead>
+            <tbody id="variantsTbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Sending Mailbox Distribution</div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Mailbox</th>
+                <th>Sent</th>
+                <th>Bounced</th>
+                <th>Bounce %</th>
+              </tr>
+            </thead>
+            <tbody id="mailboxesTbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Lead Table & Filter Segments -->
+    <div class="card">
+      <div class="card-title">
+        <span>Leads & Activity Status</span>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-secondary btn-sm" onclick="exportCsv()">Export Filtered CSV</button>
+          <button class="btn btn-primary btn-sm" id="btnCreateSegmentCamp" onclick="createCampaignFromCurrentSegment()" style="display:none;">Launch Campaign From Segment</button>
+        </div>
+      </div>
+
+      <!-- Segment Filter Pills -->
+      <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;">
+        <button class="btn btn-primary btn-sm filter-btn" onclick="applyFilter('all', this)">All</button>
+        <button class="btn btn-secondary btn-sm filter-btn" onclick="applyFilter('opened', this)">Opened</button>
+        <button class="btn btn-secondary btn-sm filter-btn" onclick="applyFilter('opened_no_reply', this)">Opened But No Reply</button>
+        <button class="btn btn-secondary btn-sm filter-btn" onclick="applyFilter('never_opened', this)">Never Opened</button>
+        <button class="btn btn-secondary btn-sm filter-btn" onclick="applyFilter('replied', this)">Replied</button>
+        <button class="btn btn-secondary btn-sm filter-btn" onclick="applyFilter('bounced', this)">Bounced</button>
+        <button class="btn btn-secondary btn-sm filter-btn" onclick="applyFilter('unsubscribed', this)">Unsubscribed</button>
+      </div>
+
+      <div class="table-responsive">
+        <table>
+          <thead>
+            <tr>
+              <th>Lead Email</th>
+              <th>Name</th>
+              <th>Company</th>
+              <th>Status</th>
+              <th>Activity Summary</th>
+              <th>Timeline</th>
+            </tr>
+          </thead>
+          <tbody id="leadsTbody">
+            <tr><td colspan="6" style="text-align:center; color: var(--text-muted);">Loading leads...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lead Timeline Modal -->
+  <div class="modal-overlay" id="timelineModal">
+    <div class="modal" style="max-width: 580px;">
+      <div class="modal-header">
+        <div class="modal-title" id="timelineModalTitle">Lead Event History</div>
+        <button class="modal-close" onclick="closeTimelineModal()">&times;</button>
+      </div>
+      <div id="timelineEventsContainer" style="display:flex; flex-direction:column; gap:12px;"></div>
+    </div>
+  </div>
+
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const campaignId = urlParams.get('id');
+    let currentFilter = 'all';
+
+    async function loadCampaignDetail() {
+      if (!campaignId) {
+        window.location.href = '/campaigns.html';
+        return;
+      }
+
+      try {
+        const [campRes, statsRes] = await Promise.all([
+          fetch(`/api/campaigns/${campaignId}`),
+          fetch(`/api/campaigns/${campaignId}/stats`)
+        ]);
+
+        const camp = await campRes.json();
+        const s = await statsRes.json();
+
+        document.getElementById('campDetailTitle').textContent = camp.name;
+        document.getElementById('campDetailSub').textContent = `Status: ${camp.status.toUpperCase()} • Timezone: ${camp.timezone} • Window: ${camp.window_start} - ${camp.window_end}`;
+
+        // Top actions
+        const actionsDiv = document.getElementById('campDetailActions');
+        actionsDiv.innerHTML = '';
+        if (camp.status === 'draft' || camp.status === 'paused') {
+          actionsDiv.innerHTML += `<button class="btn btn-primary" onclick="launchCampaign(${camp.id})">${camp.status === 'draft' ? 'Launch' : 'Resume'}</button>`;
+        } else if (camp.status === 'running') {
+          actionsDiv.innerHTML += `<button class="btn btn-secondary" onclick="pauseCampaign(${camp.id})">Pause</button>`;
+        }
+
+        // Funnel stats
+        document.getElementById('funnelLeads').textContent = s.leads.toLocaleString();
+        document.getElementById('funnelDelivered').textContent = s.delivered.toLocaleString();
+        document.getElementById('funnelSent').textContent = s.sent.toLocaleString();
+        document.getElementById('funnelOpenRate').textContent = `${s.rates.openRate}%`;
+        document.getElementById('funnelOpens').textContent = s.opened.toLocaleString();
+        document.getElementById('funnelClickRate').textContent = `${s.rates.clickRate}%`;
+        document.getElementById('funnelClicks').textContent = s.clicked.toLocaleString();
+        document.getElementById('funnelReplyRate').textContent = `${s.rates.replyRate}%`;
+        document.getElementById('funnelReplies').textContent = s.replied.toLocaleString();
+        document.getElementById('funnelBounceRate').textContent = `${s.rates.bounceRate}%`;
+        document.getElementById('funnelBounces').textContent = s.bounced.toLocaleString();
+
+        // Steps table
+        const stepsTbody = document.getElementById('stepsTbody');
+        stepsTbody.innerHTML = '';
+        for (const st of s.steps) {
+          stepsTbody.innerHTML += `
+            <tr>
+              <td><strong>Step ${st.step_number}</strong></td>
+              <td>${st.delay_days === 0 ? 'Immediately' : '+' + st.delay_days + ' days'}</td>
+              <td><code>${st.condition}</code></td>
+              <td>${st.sent}</td>
+              <td>${st.opened}</td>
+              <td>${st.clicked}</td>
+              <td>${st.replied}</td>
+            </tr>
+          `;
+        }
+
+        // Variants table
+        const varTbody = document.getElementById('variantsTbody');
+        varTbody.innerHTML = '';
+        if (s.variants.length === 0) {
+          varTbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No variants</td></tr>';
+        } else {
+          for (const v of s.variants) {
+            const vRate = v.sent > 0 ? Math.round((v.opened / v.sent) * 1000) / 10 : 0;
+            varTbody.innerHTML += `
+              <tr>
+                <td><strong>Variant ${v.variant_letter}</strong></td>
+                <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${v.subject}</td>
+                <td>${v.sent}</td>
+                <td>${v.opened}</td>
+                <td><strong>${vRate}%</strong></td>
+              </tr>
+            `;
+          }
+        }
+
+        // Mailboxes table
+        const mbTbody = document.getElementById('mailboxesTbody');
+        mbTbody.innerHTML = '';
+        if (s.mailboxes.length === 0) {
+          mbTbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">No sends recorded</td></tr>';
+        } else {
+          for (const m of s.mailboxes) {
+            const bRate = m.sent > 0 ? Math.round((m.bounced / m.sent) * 1000) / 10 : 0;
+            mbTbody.innerHTML += `
+              <tr>
+                <td><strong>${m.email}</strong></td>
+                <td>${m.sent}</td>
+                <td>${m.bounced}</td>
+                <td>${bRate}%</td>
+              </tr>
+            `;
+          }
+        }
+
+        loadLeads(currentFilter);
+
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function loadLeads(filter = 'all') {
+      currentFilter = filter;
+      const btnSegment = document.getElementById('btnCreateSegmentCamp');
+      if (filter === 'opened_no_reply' || filter === 'never_opened') {
+        btnSegment.style.display = 'inline-flex';
+        btnSegment.textContent = `New Campaign from "${filter.replace(/_/g, ' ')}"`;
+      } else {
+        btnSegment.style.display = 'none';
+      }
+
+      try {
+        const res = await fetch(`/api/campaigns/${campaignId}/leads?filter=${filter}`);
+        const data = await res.json();
+        const tbody = document.getElementById('leadsTbody');
+        tbody.innerHTML = '';
+
+        if (!data.leads || data.leads.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--text-muted);">No leads match filter "${filter}".</td></tr>`;
+          return;
+        }
+
+        for (const l of data.leads) {
+          const acts = [];
+          if (l.opened_count > 0) acts.push(`<span class="badge badge-deliverable">${l.opened_count} opens</span>`);
+          if (l.clicked_count > 0) acts.push(`<span class="badge badge-deliverable">${l.clicked_count} clicks</span>`);
+          if (l.replied_count > 0) acts.push(`<span class="badge badge-deliverable">Replied</span>`);
+          if (l.bounced_count > 0) acts.push(`<span class="badge badge-undeliverable">Bounced</span>`);
+          if (acts.length === 0) acts.push('<span style="color:var(--text-muted); font-size:12px;">Sent, no engagement</span>');
+
+          tbody.innerHTML += `
+            <tr>
+              <td><strong>${l.email}</strong></td>
+              <td>${l.first_name || '—'} ${l.last_name || ''}</td>
+              <td>${l.company || '—'}</td>
+              <td><span class="badge badge-${l.status}">${l.status}</span></td>
+              <td>${acts.join(' ')}</td>
+              <td><button class="btn btn-secondary btn-sm" onclick="showLeadTimeline(${l.id}, '${l.email}')">History</button></td>
+            </tr>
+          `;
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function applyFilter(filter, btn) {
+      document.querySelectorAll('.filter-btn').forEach(b => b.className = 'btn btn-secondary btn-sm filter-btn');
+      btn.className = 'btn btn-primary btn-sm filter-btn';
+      loadLeads(filter);
+    }
+
+    async function showLeadTimeline(leadId, email) {
+      document.getElementById('timelineModalTitle').textContent = `Activity Timeline: ${email}`;
+      const container = document.getElementById('timelineEventsContainer');
+      container.innerHTML = '<span style="color:var(--text-muted);">Loading events...</span>';
+      document.getElementById('timelineModal').style.display = 'flex';
+
+      try {
+        const res = await fetch(`/api/campaigns/${campaignId}/leads/${leadId}/timeline`);
+        const events = await res.json();
+        container.innerHTML = '';
+
+        if (events.length === 0) {
+          container.innerHTML = '<span style="color:var(--text-muted);">No activity recorded yet for this lead.</span>';
+          return;
+        }
+
+        for (const ev of events) {
+          let badgeClass = 'badge-neutral';
+          if (ev.type === 'sent') badgeClass = 'badge-primary';
+          if (ev.type === 'open') badgeClass = 'badge-deliverable';
+          if (ev.type === 'reply') badgeClass = 'badge-deliverable';
+          if (ev.type === 'click') badgeClass = 'badge-deliverable';
+          if (ev.type.startsWith('bounce')) badgeClass = 'badge-undeliverable';
+
+          container.innerHTML += `
+            <div style="padding:10px 14px; background:#090d16; border-radius:6px; border:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
+              <div>
+                <span class="badge ${badgeClass}" style="margin-right:8px;">${ev.type.toUpperCase()}</span>
+                <span style="font-size:12px; color:var(--text-secondary);">${ev.timestamp}</span>
+              </div>
+              <div style="font-size:11px; color:var(--text-muted); max-width:220px; overflow:hidden; text-overflow:ellipsis;">
+                ${ev.meta_json || ''}
+              </div>
+            </div>
+          `;
+        }
+      } catch (err) {
+        container.innerHTML = '<span style="color:var(--danger);">Failed to load timeline.</span>';
+      }
+    }
+
+    function closeTimelineModal() {
+      document.getElementById('timelineModal').style.display = 'none';
+    }
+
+    function exportCsv() {
+      window.location.href = `/api/campaigns/${campaignId}/export?filter=${currentFilter}`;
+    }
+
+    async function createCampaignFromCurrentSegment() {
+      const campName = prompt(`Enter new campaign name for segment "${currentFilter}":`, `Retarget: ${currentFilter}`);
+      if (!campName) return;
+
+      try {
+        const res = await fetch(`/api/campaigns/${campaignId}/segment-campaign`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ segment: currentFilter, name: campName })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert('Error: ' + data.error);
+          return;
+        }
+        alert(`New campaign "${campName}" created with ${data.leadCount} leads!`);
+        window.location.href = `/campaign-detail.html?id=${data.campaign.id}`;
+      } catch (err) {
+        alert('Failed: ' + err.message);
+      }
+    }
+
+    async function launchCampaign(id) {
+      if (!confirm('Launch campaign?')) return;
+      await fetch(`/api/campaigns/${id}/launch`, { method: 'POST' });
+      loadCampaignDetail();
+    }
+
+    async function pauseCampaign(id) {
+      await fetch(`/api/campaigns/${id}/pause`, { method: 'POST' });
+      loadCampaignDetail();
+    }
+
+    loadCampaignDetail();
+  </script>
+</body>
+</html>

@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MailCheck — Settings</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-dot"></span> MailCheck
+    </div>
+    <ul class="nav-links">
+      <li><a href="/">📊 Overview</a></li>
+      <li><a href="/campaigns.html">🚀 Campaigns</a></li>
+      <li><a href="/mailboxes.html">📬 Mailboxes & Warm-up</a></li>
+      <li><a href="/verifier.html">🛡️ Email Verifier</a></li>
+      <li><a href="/replies.html">💬 Replies Inbox</a></li>
+      <li><a href="/suppression.html">🚫 Suppression List</a></li>
+      <li><a href="/settings.html" class="active">⚙️ Settings</a></li>
+    </ul>
+    <div class="sidebar-footer">Self-hosted on localhost:3000</div>
+  </div>
+
+  <div class="main-content">
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Platform Settings</h1>
+        <p class="page-desc">Mandatory CAN-SPAM sender postal footer, public tracking URL routing, and default sending safety limits.</p>
+      </div>
+      <div>
+        <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+      </div>
+    </div>
+
+    <!-- Warnings Container -->
+    <div id="settingsWarningBanner" class="banner banner-warning" style="display:none;"></div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+      <!-- Compliance & Identity -->
+      <div class="card">
+        <div class="card-title">Compliance & Postal Address</div>
+        <p style="font-size:13px; color:var(--text-secondary); margin-bottom:14px;">
+          CAN-SPAM and international cold email legislation require a physical postal address footer in every marketing and cold outreach email. Campaigns cannot be launched without this.
+        </p>
+
+        <div class="form-group">
+          <label>Sender Physical Postal Address *</label>
+          <textarea id="settingPostalAddress" rows="3" placeholder="Acme Inc., 123 Market St, Suite 400, San Francisco, CA 94105, USA"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label>Default Timezone</label>
+          <input type="text" id="settingTimezone" value="UTC" placeholder="e.g. America/New_York or UTC">
+        </div>
+      </div>
+
+      <!-- Public Server & Tracking Tunnel -->
+      <div class="card">
+        <div class="card-title">
+          <span>Public Server URL (Tracking & Unsubscribe)</span>
+          <span id="publicUrlStatus" class="badge badge-unknown">Checking...</span>
+        </div>
+        <p style="font-size:13px; color:var(--text-secondary); margin-bottom:14px;">
+          Your public server (binds 0.0.0.0:3001) serves open pixels, click redirects, and unsubscribe links. Expose port 3001 with Cloudflare Tunnel (<code>cloudflared tunnel --url http://localhost:3001</code>) or ngrok, and paste the public HTTPS URL below.
+        </p>
+
+        <div class="form-group">
+          <label>PUBLIC_BASE_URL *</label>
+          <input type="text" id="settingPublicBaseUrl" placeholder="https://track.yourdomain.com or https://xxxx.ngrok-free.app">
+        </div>
+
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-secondary btn-sm" onclick="testPublicUrl()">Test Public URL Reachability</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Default Sending Safeguards -->
+    <div class="card">
+      <div class="card-title">Default Sending Safeguards & Jitter</div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px;">
+        <div class="form-group">
+          <label>Default Daily Cap Per Mailbox</label>
+          <input type="number" id="settingDefaultCap" value="50">
+        </div>
+        <div class="form-group">
+          <label>Default Min Gap Between Sends (seconds)</label>
+          <input type="number" id="settingDefaultMinGap" value="90">
+        </div>
+        <div class="form-group">
+          <label>Default Max Gap Between Sends (seconds)</label>
+          <input type="number" id="settingDefaultMaxGap" value="240">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    async function loadSettings() {
+      try {
+        const res = await fetch('/api/settings');
+        const s = await res.json();
+
+        document.getElementById('settingPostalAddress').value = s.postal_address || '';
+        document.getElementById('settingTimezone').value = s.timezone || 'UTC';
+        document.getElementById('settingPublicBaseUrl').value = s.public_base_url || '';
+        document.getElementById('settingDefaultCap').value = s.default_daily_cap || 50;
+        document.getElementById('settingDefaultMinGap').value = s.default_min_gap_sec || 90;
+        document.getElementById('settingDefaultMaxGap').value = s.default_max_gap_sec || 240;
+
+        testPublicUrl();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function saveSettings() {
+      const payload = {
+        postal_address: document.getElementById('settingPostalAddress').value.trim(),
+        timezone: document.getElementById('settingTimezone').value.trim(),
+        public_base_url: document.getElementById('settingPublicBaseUrl').value.trim(),
+        default_daily_cap: document.getElementById('settingDefaultCap').value,
+        default_min_gap_sec: document.getElementById('settingDefaultMinGap').value,
+        default_max_gap_sec: document.getElementById('settingDefaultMaxGap').value
+      };
+
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (res.ok) {
+          alert('Settings saved successfully!');
+          testPublicUrl();
+        }
+      } catch (err) {
+        alert('Failed to save settings: ' + err.message);
+      }
+    }
+
+    async function testPublicUrl() {
+      const url = document.getElementById('settingPublicBaseUrl').value.trim();
+      const statusBadge = document.getElementById('publicUrlStatus');
+      const warningBanner = document.getElementById('settingsWarningBanner');
+
+      if (!url) {
+        statusBadge.className = 'badge badge-warn';
+        statusBadge.textContent = 'UNSET';
+        warningBanner.style.display = 'block';
+        warningBanner.innerHTML = '⚠️ <strong>PUBLIC_BASE_URL is unset:</strong> Tracking and unsubscribe links will fail when recipients receive emails. Expose port 3001 with Cloudflare Tunnel or ngrok and set the URL above.';
+        return;
+      }
+
+      statusBadge.className = 'badge badge-unknown';
+      statusBadge.textContent = 'Testing...';
+
+      try {
+        // Attempt a test fetch to open pixel route on the configured URL
+        const testRes = await fetch(`${url.replace(/\/+$/, '')}/t/o/test_probe.gif`, { mode: 'no-cors' });
+        statusBadge.className = 'badge badge-deliverable';
+        statusBadge.textContent = 'REACHABLE';
+        warningBanner.style.display = 'none';
+      } catch (err) {
+        statusBadge.className = 'badge badge-warn';
+        statusBadge.textContent = 'UNREACHABLE / PROXY';
+        warningBanner.style.display = 'block';
+        warningBanner.innerHTML = `⚠️ <strong>Warning:</strong> Could not reach ${url} directly from your browser. Ensure your Cloudflare Tunnel or ngrok is active and pointing to 0.0.0.0:3001.`;
+      }
+    }
+
+    loadSettings();
+  </script>
+</body>
+</html>

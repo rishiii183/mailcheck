@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MailCheck — Suppression List</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-dot"></span> MailCheck
+    </div>
+    <ul class="nav-links">
+      <li><a href="/">📊 Overview</a></li>
+      <li><a href="/campaigns.html">🚀 Campaigns</a></li>
+      <li><a href="/mailboxes.html">📬 Mailboxes & Warm-up</a></li>
+      <li><a href="/verifier.html">🛡️ Email Verifier</a></li>
+      <li><a href="/replies.html">💬 Replies Inbox</a></li>
+      <li><a href="/suppression.html" class="active">🚫 Suppression List</a></li>
+      <li><a href="/settings.html">⚙️ Settings</a></li>
+    </ul>
+    <div class="sidebar-footer">Self-hosted on localhost:3000</div>
+  </div>
+
+  <div class="main-content">
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Global Suppression List</h1>
+        <p class="page-desc">Any address on this list is permanently blocked from all campaign sends (unsubscribes, hard bounces, manual additions).</p>
+      </div>
+      <div>
+        <button class="btn btn-primary" onclick="openAddSuppressionModal()">+ Add Suppressed Email</button>
+      </div>
+    </div>
+
+    <!-- Quick Add / Import Card -->
+    <div class="card" style="margin-bottom: 20px;">
+      <div class="card-title">Bulk Import Suppression CSV / Paste</div>
+      <div style="display:flex; gap:12px; align-items:flex-end;">
+        <div style="flex:1;">
+          <textarea id="bulkSuppressionInput" rows="3" placeholder="Enter emails separated by commas or line breaks..."></textarea>
+        </div>
+        <button class="btn btn-secondary" onclick="handleImportSuppression()">Import Suppression List</button>
+      </div>
+    </div>
+
+    <!-- Suppression Table -->
+    <div class="card">
+      <div class="table-responsive">
+        <table>
+          <thead>
+            <tr>
+              <th>Suppressed Email</th>
+              <th>Reason</th>
+              <th>Date Added</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="suppressionTbody">
+            <tr><td colspan="4" style="text-align:center; color:var(--text-muted);">Loading suppression list...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Single Suppression Modal -->
+  <div class="modal-overlay" id="addModal">
+    <div class="modal" style="max-width: 480px;">
+      <div class="modal-header">
+        <div class="modal-title">Add Email to Suppression</div>
+        <button class="modal-close" onclick="closeAddModal()">&times;</button>
+      </div>
+      <form onsubmit="handleAddSingle(event)">
+        <div class="form-group">
+          <label>Email Address *</label>
+          <input type="email" id="singleSuppEmail" required placeholder="target@example.com">
+        </div>
+        <div class="form-group">
+          <label>Reason</label>
+          <select id="singleSuppReason">
+            <option value="manual" selected>Manual Addition</option>
+            <option value="unsubscribe">Unsubscribed</option>
+            <option value="hard_bounce">Hard Bounce</option>
+          </select>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
+          <button type="button" class="btn btn-secondary" onclick="closeAddModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary">Add to Suppression</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    async function loadSuppression() {
+      try {
+        const res = await fetch('/api/suppression');
+        const data = await res.json();
+        const tbody = document.getElementById('suppressionTbody');
+        tbody.innerHTML = '';
+
+        if (!data.items || data.items.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">Suppression list is currently empty.</td></tr>';
+          return;
+        }
+
+        for (const item of data.items) {
+          let badge = 'badge-neutral';
+          if (item.reason === 'unsubscribe') badge = 'badge-warn';
+          if (item.reason === 'hard_bounce') badge = 'badge-undeliverable';
+
+          tbody.innerHTML += `
+            <tr>
+              <td><strong>${item.email}</strong></td>
+              <td><span class="badge ${badge}">${item.reason.toUpperCase()}</span></td>
+              <td style="color:var(--text-secondary);">${item.created_at}</td>
+              <td>
+                <button class="btn btn-danger btn-sm" onclick="removeSuppression('${item.email}')">Remove</button>
+              </td>
+            </tr>
+          `;
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function openAddModal() {
+      document.getElementById('addModal').style.display = 'flex';
+    }
+
+    function closeAddModal() {
+      document.getElementById('addModal').style.display = 'none';
+    }
+
+    async function handleAddSingle(e) {
+      e.preventDefault();
+      const email = document.getElementById('singleSuppEmail').value.trim();
+      const reason = document.getElementById('singleSuppReason').value;
+
+      try {
+        await fetch('/api/suppression', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, reason })
+        });
+        closeAddModal();
+        loadSuppression();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function handleImportSuppression() {
+      const text = document.getElementById('bulkSuppressionInput').value.trim();
+      if (!text) return;
+
+      try {
+        const res = await fetch('/api/suppression', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ emails: text, reason: 'import' })
+        });
+        const data = await res.json();
+        alert(`Imported ${data.imported} emails into suppression list.`);
+        document.getElementById('bulkSuppressionInput').value = '';
+        loadSuppression();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function removeSuppression(email) {
+      if (!confirm(`Remove ${email} from suppression list? Future campaigns could contact this email.`)) return;
+      await fetch(`/api/suppression/${encodeURIComponent(email)}`, { method: 'DELETE' });
+      loadSuppression();
+    }
+
+    loadSuppression();
+  </script>
+</body>
+</html>

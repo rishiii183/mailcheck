@@ -1,0 +1,33 @@
+{
+  "name": "mailcheck",
+  "version": "1.0.0",
+  "description": "Self-hosted cold-email platform",
+  "main": "src/admin.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/admin.js",
+    "public": "node src/public.js",
+    "test": "node --test test/**/*.test.js",
+    "update-disposable": "node scripts/update-disposable.js"
+  },
+  "keywords": [
+    "email",
+    "verifier",
+    "cold-email",
+    "warmup",
+    "tracking"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@fastify/multipart": "^10.1.9",
+    "@fastify/static": "^11.0.0",
+    "better-sqlite3": "^13.2.0",
+    "dotenv": "^18.0.10",
+    "fastify": "^5.12.8",
+    "imapflow": "^2.12.2",
+    "mailparser": "^3.15.0",
+    "nodemailer": "^10.6.1",
+    "p-queue": "^10.0.0"
+  }
+}

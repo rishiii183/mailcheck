@@ -1,0 +1,395 @@
+import nodemailer from 'nodemailer';
+import { getDb, getSetting } from '../db.js';
+import { getMailboxById } from '../mailboxes/accounts.js';
+import { checkMailboxCapacity, isWithinSendWindow } from '../mailboxes/limits.js';
+import { isSuppressed, addSuppression } from './suppression.js';
+import { renderSpintax, renderVariables, injectTrackingAndFooter, rewriteLinks, htmlToPlainText } from './render.js';
+import { prepareTracking, registerTrackingLink } from './tracking.js';
+import { sendQueue } from '../queue.js';
+import { generateToken } from '../crypto.js';
+
+let engineInterval = null;
+let isProcessingTick = false;
+
+// Memory map of last send timestamp per mailbox ID to enforce gap spacing
+const mailboxLastSendMap = new Map();
+
+/**
+ * Perform a single execution tick of the campaign sending scheduler
+ * @param {Object} [options] Options for testing (e.g. mockSend, ignoreSchedule, ignoreGaps)
+ */
+export async function runSchedulerTick(options = {}) {
+  if (isProcessingTick && !options.force) {
+    return { skipped: true, reason: 'Tick already in progress' };
+  }
+  isProcessingTick = true;
+
+  const results = {
+    processedCampaigns: 0,
+    sent: 0,
+    retried: 0,
+    failed: 0,
+    skipped: 0
+  };
+
+  try {
+    const db = getDb();
+    const postalAddress = getSetting('postal_address') || '';
+
+    // Fetch active running campaigns
+    const runningCampaigns = db.prepare("SELECT * FROM campaigns WHERE status = 'running'").all();
+    results.processedCampaigns = runningCampaigns.length;
+
+    for (const campaign of runningCampaigns) {
+      // 1. Check schedule window (unless explicitly bypassed in tests)
+      if (!options.ignoreSchedule) {
+        const schedule = {
+          timezone: campaign.timezone,
+          send_days: JSON.parse(campaign.send_days_json || '[1,2,3,4,5]'),
+          window_start: campaign.window_start,
+          window_end: campaign.window_end
+        };
+        if (!isWithinSendWindow(schedule)) {
+          continue;
+        }
+      }
+
+      // 2. Fetch assigned mailboxes for campaign
+      const mbRows = db.prepare('SELECT mailbox_id FROM campaign_mailboxes WHERE campaign_id = ?').all(campaign.id);
+      if (mbRows.length === 0) continue;
+
+      const availableMailboxes = [];
+      for (const row of mbRows) {
+        const mb = getMailboxById(row.mailbox_id, true);
+        if (!mb) continue;
+        const capacity = checkMailboxCapacity(mb);
+        if (capacity.canSend) {
+          availableMailboxes.push({ mailbox: mb, capacity });
+        }
+      }
+
+      if (availableMailboxes.length === 0) {
+        // No mailboxes currently have sending allowance
+        continue;
+      }
+
+      // 3. Fetch candidate lead steps due for sending
+      const candidateSteps = db.prepare(`
+        SELECT ls.*, l.email as lead_email, l.first_name, l.last_name, l.company, l.custom_fields_json,
+               l.status as lead_status, ss.step_number, ss.condition,
+               sv.subject, sv.body_html, sv.body_text
+        FROM lead_steps ls
+        JOIN leads l ON l.id = ls.lead_id
+        JOIN sequence_steps ss ON ss.id = ls.sequence_step_id
+        JOIN step_variants sv ON sv.id = ls.variant_id
+        WHERE ls.campaign_id = ?
+          AND (
+            (ls.status = 'pending' AND ls.scheduled_at <= datetime('now'))
+            OR (ls.status = 'retrying' AND ls.next_retry_at <= datetime('now'))
+          )
+        ORDER BY ls.scheduled_at ASC
+        LIMIT 25
+      `).all(campaign.id);
+
+      if (candidateSteps.length === 0) continue;
+
+      let rotationIndex = 0;
+
+      for (const step of candidateSteps) {
+        const email = (step.lead_email || '').toLowerCase().trim();
+
+        // Safety check 1: Lead status & Global suppression
+        if (isSuppressed(email) || step.lead_status === 'unsubscribed' || step.lead_status === 'bounced') {
+          db.prepare("UPDATE lead_steps SET status = 'skipped', last_error = 'Suppressed or inactive' WHERE id = ?").run(step.id);
+          results.skipped++;
+          continue;
+        }
+
+        // Safety check 2: Condition "if_no_reply"
+        if (step.condition === 'if_no_reply') {
+          const replyExists = db.prepare(`
+            SELECT id FROM replies
+            WHERE lead_id = ?
+              AND lead_step_id IN (SELECT id FROM lead_steps WHERE campaign_id = ?)
+              AND is_auto_reply = 0
+            LIMIT 1
+          `).get(step.lead_id, campaign.id);
+
+          if (replyExists) {
+            db.prepare("UPDATE lead_steps SET status = 'skipped', last_error = 'Recipient replied' WHERE id = ?").run(step.id);
+            results.skipped++;
+            continue;
+          }
+        }
+
+        // Pick next available mailbox
+        const currentMbEntry = availableMailboxes[rotationIndex % availableMailboxes.length];
+        const selectedMailbox = currentMbEntry.mailbox;
+        rotationIndex++;
+
+        // Enforce gap between sends for this mailbox
+        const nowMs = Date.now();
+        const lastSend = mailboxLastSendMap.get(selectedMailbox.id) || 0;
+        const minGapMs = (campaign.min_gap_seconds || 90) * 1000;
+        if (!options.ignoreGaps && (nowMs - lastSend < minGapMs)) {
+          continue;
+        }
+
+        // 4. ATOMIC CLAIM: DB Transaction guarantees step cannot be double-sent
+        const claimResult = db.transaction(() => {
+          return db.prepare(`
+            UPDATE lead_steps
+            SET status = 'claimed',
+                mailbox_id = ?
+            WHERE id = ? AND status IN ('pending', 'retrying')
+          `).run(selectedMailbox.id, step.id);
+        })();
+
+        if (claimResult.changes === 0) {
+          // Already claimed by another worker or race avoided
+          continue;
+        }
+
+        // 5. Send message
+        try {
+          await executeSendStep({
+            step,
+            mailbox: selectedMailbox,
+            campaign,
+            postalAddress,
+            options
+          });
+
+          mailboxLastSendMap.set(selectedMailbox.id, Date.now());
+          results.sent++;
+        } catch (err) {
+          handleSendFailure(step.id, step.lead_email, step.retry_count || 0, err);
+          if (/5\d{2}|invalid|user unknown|mailbox not found|address rejected/i.test(err.message)) {
+            results.failed++;
+          } else {
+            results.retried++;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Campaign scheduler error:', err);
+  } finally {
+    isProcessingTick = false;
+  }
+
+  return results;
+}
+
+/**
+ * Execute sending of a claimed lead step
+ */
+async function executeSendStep({ step, mailbox, campaign, postalAddress, options = {} }) {
+  const db = getDb();
+
+  // Setup tracking URLs and headers
+  const tracking = prepareTracking(step.id, mailbox.email, step.open_token);
+
+  const lead = {
+    email: step.lead_email,
+    first_name: step.first_name || '',
+    last_name: step.last_name || '',
+    company: step.company || '',
+    custom_fields: step.custom_fields_json ? JSON.parse(step.custom_fields_json) : {}
+  };
+
+  let subject = renderSpintax(renderVariables(step.subject, lead));
+  let rawBody = renderSpintax(renderVariables(step.body_html, lead));
+
+  // Threading for follow-up steps (step_number > 1)
+  let threadMessageId = null;
+  const extraHeaders = { ...tracking.headers };
+
+  if (step.step_number > 1) {
+    const firstStep = db.prepare(`
+      SELECT message_id FROM lead_steps ls
+      JOIN sequence_steps ss ON ss.id = ls.sequence_step_id
+      WHERE ls.lead_id = ? AND ls.campaign_id = ? AND ss.step_number = 1 AND ls.status = 'sent'
+      LIMIT 1
+    `).get(step.lead_id, campaign.id);
+
+    if (firstStep && firstStep.message_id) {
+      threadMessageId = firstStep.message_id;
+      extraHeaders['In-Reply-To'] = threadMessageId;
+      extraHeaders['References'] = threadMessageId;
+      if (!/^re:/i.test(subject)) {
+        subject = `Re: ${subject}`;
+      }
+    }
+  }
+
+  // Rewrite URLs for click tracking (excluding unsubscribe)
+  const trackedBody = rewriteLinks(rawBody, (url) => registerTrackingLink(step.id, url), tracking.publicBaseUrl);
+
+  // Inject open tracking pixel and postal footer
+  const finalHtml = injectTrackingAndFooter(trackedBody, {
+    openToken: tracking.openToken,
+    unsubscribeUrl: tracking.unsubscribeUrl,
+    postalAddress,
+    publicBaseUrl: tracking.publicBaseUrl
+  });
+
+  const plainText = htmlToPlainText(finalHtml);
+
+  // Nodemailer sending
+  const mailOptions = {
+    from: `"${mailbox.display_name}" <${mailbox.email}>`,
+    to: step.lead_email,
+    subject,
+    html: finalHtml,
+    text: plainText,
+    headers: extraHeaders
+  };
+
+  let sentResult;
+  if (options.mockSend) {
+    sentResult = await options.mockSend(mailOptions);
+  } else {
+    const transporter = nodemailer.createTransport({
+      host: mailbox.smtp_host,
+      port: mailbox.smtp_port,
+      secure: Boolean(mailbox.smtp_secure),
+      auth: {
+        user: mailbox.smtp_user,
+        pass: mailbox.smtp_pass
+      },
+      tls: { rejectUnauthorized: false }
+    });
+
+    sentResult = await sendQueue.enqueue(mailbox.smtp_host, () => transporter.sendMail(mailOptions));
+  }
+
+  const messageId = sentResult?.messageId || `<${generateToken()}@${mailbox.email.split('@')[1]}>`;
+
+  // Update lead_step as successfully sent
+  db.prepare(`
+    UPDATE lead_steps
+    SET status = 'sent',
+        sent_at = CURRENT_TIMESTAMP,
+        message_id = ?,
+        thread_message_id = ?,
+        open_token = ?,
+        last_error = NULL
+    WHERE id = ?
+  `).run(messageId, threadMessageId, tracking.openToken, step.id);
+
+  // Record sent event
+  db.prepare(`
+    INSERT INTO email_events (lead_step_id, type, token, timestamp, meta_json)
+    VALUES (?, 'sent', ?, CURRENT_TIMESTAMP, ?)
+  `).run(step.id, tracking.openToken, JSON.stringify({ mailbox_id: mailbox.id, variant_id: step.variant_id }));
+
+  // Schedule next sequence step if available
+  scheduleNextStep(step, campaign);
+}
+
+/**
+ * Handle failure when sending an email
+ */
+function handleSendFailure(stepId, email, retryCount, err) {
+  const db = getDb();
+  const errorMsg = err.message || 'SMTP Send Failed';
+  const isHardFail = /5\d{2}|invalid recipient|user unknown|mailbox not found|address rejected/i.test(errorMsg);
+
+  if (isHardFail) {
+    // Hard bounce -> mark failed, suppress email
+    db.prepare(`
+      UPDATE lead_steps
+      SET status = 'failed', last_error = ?
+      WHERE id = ?
+    `).run(errorMsg, stepId);
+
+    db.prepare(`
+      INSERT INTO email_events (lead_step_id, type, timestamp, meta_json)
+      VALUES (?, 'bounce_hard', CURRENT_TIMESTAMP, ?)
+    `).run(stepId, JSON.stringify({ error: errorMsg }));
+
+    addSuppression(email, 'hard_bounce');
+  } else {
+    // Soft failure -> retry up to 3 times
+    const nextRetry = (retryCount || 0) + 1;
+    if (nextRetry < 3) {
+      db.prepare(`
+        UPDATE lead_steps
+        SET status = 'retrying',
+            retry_count = ?,
+            next_retry_at = datetime('now', '+15 minutes'),
+            last_error = ?
+        WHERE id = ?
+      `).run(nextRetry, errorMsg, stepId);
+    } else {
+      db.prepare(`
+        UPDATE lead_steps
+        SET status = 'failed',
+            retry_count = ?,
+            last_error = ?
+        WHERE id = ?
+      `).run(nextRetry, `Exceeded 3 retries: ${errorMsg}`, stepId);
+    }
+  }
+}
+
+/**
+ * Schedule next step in the campaign sequence
+ */
+function scheduleNextStep(currentStep, campaign) {
+  const db = getDb();
+  const nextStep = db.prepare(`
+    SELECT * FROM sequence_steps
+    WHERE campaign_id = ? AND step_number = ?
+    LIMIT 1
+  `).get(campaign.id, currentStep.step_number + 1);
+
+  if (!nextStep) {
+    // Check if campaign is finished
+    const pendingCount = db.prepare(`
+      SELECT COUNT(*) as cnt FROM lead_steps
+      WHERE campaign_id = ? AND status IN ('pending', 'retrying', 'claimed')
+    `).get(campaign.id).cnt;
+
+    if (pendingCount === 0) {
+      db.prepare("UPDATE campaigns SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(campaign.id);
+    }
+    return;
+  }
+
+  const variants = db.prepare('SELECT * FROM step_variants WHERE sequence_step_id = ?').all(nextStep.id);
+  if (variants.length === 0) return;
+
+  const chosenVariant = variants[Math.floor(Math.random() * variants.length)];
+  const delayDays = nextStep.delay_days || 1;
+
+  db.prepare(`
+    INSERT OR IGNORE INTO lead_steps (
+      campaign_id, lead_id, sequence_step_id, variant_id, status, scheduled_at
+    ) VALUES (
+      ?, ?, ?, ?, 'pending', datetime('now', '+' || ? || ' days')
+    )
+  `).run(campaign.id, currentStep.lead_id, nextStep.id, chosenVariant.id, delayDays);
+}
+
+/**
+ * Start 30-second scheduler interval
+ */
+export function startEngine(intervalMs = 30000) {
+  if (engineInterval) return;
+  runSchedulerTick();
+  engineInterval = setInterval(() => {
+    runSchedulerTick();
+  }, intervalMs);
+}
+
+/**
+ * Stop scheduler interval
+ */
+export function stopEngine() {
+  if (engineInterval) {
+    clearInterval(engineInterval);
+    engineInterval = null;
+  }
+}
