@@ -93,7 +93,7 @@ export async function sendWarmupEmail(sender, partner, template, warmupId, optio
       user: sender.smtp_user,
       pass: sender.smtp_pass
     },
-    tls: { rejectUnauthorized: false }
+    tls: sender.allow_self_signed ? { rejectUnauthorized: false } : undefined
   });
 
   const mailOptions = {
@@ -147,7 +147,7 @@ export async function processPartnerWarmupImap(partner, sender, warmupId, option
       pass: partner.imap_pass
     },
     logger: false,
-    tls: { rejectUnauthorized: false }
+    tls: partner.allow_self_signed ? { rejectUnauthorized: false } : undefined
   });
 
   try {

@@ -16,6 +16,7 @@ import { listReplies, labelReply, markReplyHandled } from './campaigns/replies.j
 import { listSuppression, addSuppression, removeSuppression, importSuppression } from './campaigns/suppression.js';
 import { startEngine, stopEngine, runSchedulerTick } from './campaigns/engine.js';
 import { startReplyPoller, stopReplyPoller } from './campaigns/replies.js';
+import { startWarmupRunner, stopWarmupRunner } from './warmup/runner.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,13 +36,38 @@ export function createAdminServer(options = {}) {
     prefix: '/'
   });
 
-  // Optional API Key Authentication Hook
-  fastify.addHook('preHandler', async (request, reply) => {
-    // Only check /api/* routes
-    if (!request.url.startsWith('/api/')) return;
+  // Global Error Handler - returns JSON { error }
+  fastify.setErrorHandler((error, request, reply) => {
+    const statusCode = error.statusCode || 500;
+    const message = error.message || 'Internal Server Error';
+    return reply.status(statusCode).send({ error: message });
+  });
 
-    const apiKey = config.admin.apiKey;
-    if (apiKey && apiKey.trim()) {
+  // 1.5 Security: Host check (DNS rebinding), Origin check (CSRF), Mandatory API_KEY
+  fastify.addHook('preHandler', async (request, reply) => {
+    // 1. Host header validation
+    const rawHost = request.headers.host || '';
+    const host = rawHost.split(':')[0].toLowerCase();
+    const allowedHosts = ['localhost', '127.0.0.1', '::1', '[::1]'];
+    if (!host || !allowedHosts.includes(host)) {
+      return reply.status(403).send({ error: 'Forbidden: Invalid Host header' });
+    }
+
+    // 2. CSRF defense: verify Origin for non-GET requests if present
+    if (request.method !== 'GET' && request.headers.origin) {
+      try {
+        const originUrl = new URL(request.headers.origin);
+        if (!allowedHosts.includes(originUrl.hostname.toLowerCase())) {
+          return reply.status(403).send({ error: 'Forbidden: Cross-origin request blocked' });
+        }
+      } catch {
+        return reply.status(403).send({ error: 'Forbidden: Invalid Origin header' });
+      }
+    }
+
+    // 3. Mandatory API_KEY authentication for all /api/* routes
+    if (request.url.startsWith('/api/')) {
+      const apiKey = config.admin.apiKey;
       const authHeader = request.headers.authorization;
       const xApiKey = request.headers['x-api-key'];
       const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : xApiKey;
@@ -480,9 +506,22 @@ export function createAdminServer(options = {}) {
 if (process.argv[1] && process.argv[1].endsWith('admin.js')) {
   const server = createAdminServer({ logger: true });
 
-  // Start background schedulers
+  // 1.4 Start background schedulers (engine, replies, warmup)
   startEngine(config.scheduler.intervalMs);
   startReplyPoller(120000);
+  startWarmupRunner(300000);
+
+  const shutdown = async () => {
+    console.log('Shutting down MailCheck background services...');
+    stopEngine();
+    stopReplyPoller();
+    stopWarmupRunner();
+    await server.close();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 
   server.listen({ host: config.admin.host, port: config.admin.port }, (err, address) => {
     if (err) {

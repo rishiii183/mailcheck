@@ -21,6 +21,7 @@
   "license": "MIT",
   "dependencies": {
     "@fastify/multipart": "^10.1.9",
+    "@fastify/rate-limit": "^11.3.0",
     "@fastify/static": "^11.0.0",
     "better-sqlite3": "^13.2.0",
     "dotenv": "^18.0.10",

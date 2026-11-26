@@ -25,9 +25,7 @@ export async function testMailboxConnection(params) {
         pass: params.smtp_pass
       },
       connectionTimeout: 10000,
-      tls: {
-        rejectUnauthorized: false // Allow self-signed or custom dev setups
-      }
+      tls: params.allow_self_signed ? { rejectUnauthorized: false } : undefined
     });
 
     await transporter.verify();
@@ -47,9 +45,7 @@ export async function testMailboxConnection(params) {
         pass: params.imap_pass
       },
       logger: false,
-      tls: {
-        rejectUnauthorized: false
-      }
+      tls: params.allow_self_signed ? { rejectUnauthorized: false } : undefined
     });
 
     await client.connect();
@@ -94,12 +90,14 @@ export async function createMailbox(data, options = {}) {
       email, display_name,
       smtp_host, smtp_port, smtp_secure, smtp_user, smtp_pass_encrypted,
       imap_host, imap_port, imap_secure, imap_user, imap_pass_encrypted,
-      status, daily_warmup_target, warmup_start_date, campaign_daily_cap
+      status, daily_warmup_target, warmup_start_date, campaign_daily_cap,
+      allow_self_signed
     ) VALUES (
       ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
-      ?, ?, ?, ?
+      ?, ?, ?, ?,
+      ?
     )
   `);
 
@@ -122,7 +120,8 @@ export async function createMailbox(data, options = {}) {
     initialStatus,
     data.daily_warmup_target || 40,
     warmupStartDate,
-    data.campaign_daily_cap || 50
+    data.campaign_daily_cap || 50,
+    data.allow_self_signed ? 1 : 0
   );
 
   const mailboxId = Number(res.lastInsertRowid);
@@ -261,6 +260,10 @@ export function updateMailbox(id, updates) {
   if (updates.campaign_daily_cap !== undefined) {
     fields.push('campaign_daily_cap = ?');
     values.push(parseInt(updates.campaign_daily_cap, 10));
+  }
+  if (updates.allow_self_signed !== undefined) {
+    fields.push('allow_self_signed = ?');
+    values.push(updates.allow_self_signed ? 1 : 0);
   }
 
   if (fields.length === 0) return getMailboxById(id);

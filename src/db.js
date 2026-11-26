@@ -74,6 +74,7 @@ export function migrate(db) {
       imap_pass_encrypted TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'ready', -- 'warming', 'ready', 'paused', 'error'
       error_reason TEXT,
+      allow_self_signed INTEGER DEFAULT 0,
       daily_warmup_target INTEGER DEFAULT 40,
       warmup_start_date TEXT,
       campaign_daily_cap INTEGER DEFAULT 50,
@@ -280,6 +281,16 @@ export function migrate(db) {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- Mailbox IMAP sync tracking
+    CREATE TABLE IF NOT EXISTS mailbox_sync (
+      mailbox_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+      folder TEXT NOT NULL DEFAULT 'INBOX',
+      last_uid INTEGER NOT NULL DEFAULT 0,
+      uidvalidity TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (mailbox_id, folder)
+    );
+
     -- Performance & safety indexes
     CREATE INDEX IF NOT EXISTS idx_lead_steps_status_sched ON lead_steps(status, scheduled_at);
     CREATE INDEX IF NOT EXISTS idx_email_events_lead_step_type ON email_events(lead_step_id, type);
@@ -287,6 +298,13 @@ export function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_warmup_events_warmup_id ON warmup_events(warmup_id);
     CREATE INDEX IF NOT EXISTS idx_warmup_events_mailbox ON warmup_events(mailbox_id, created_at);
   `);
+
+  // Migration for existing mailboxes table
+  try {
+    db.exec('ALTER TABLE mailboxes ADD COLUMN allow_self_signed INTEGER DEFAULT 0');
+  } catch (err) {
+    // Column already exists
+  }
 
   // Initialize default settings if not existing
   const initSetting = db.prepare(`
