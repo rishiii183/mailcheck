@@ -1,4 +1,4 @@
-# MailCheck — Self-Hosted Cold-Email & Deliverability Platform
+# MailCheck Self-Hosted Cold-Email & Deliverability Platform
 
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg?style=flat-square)](https://nodejs.org/)
 [![Fastify](https://img.shields.io/badge/fastify-v5.12-black.svg?style=flat-square)](https://fastify.dev/)
