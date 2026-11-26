@@ -42,6 +42,8 @@ export const config = {
   },
   verifier: {
     disposableFile: path.join(dataDir, 'disposable.txt'),
-    smtpTimeoutMs: 12000
+    smtpTimeoutMs: parseInt(process.env.SMTP_TIMEOUT_MS || '7000', 10),  // Reduced from 12s → 7s default
+    mxTimeoutMs:   parseInt(process.env.MX_TIMEOUT_MS   || '5000', 10),  // DNS MX lookup timeout
+    bulkConcurrency: parseInt(process.env.BULK_CONCURRENCY || '8', 10)    // Parallel bulk verifications
   }
 };

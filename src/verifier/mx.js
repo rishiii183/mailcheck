@@ -1,4 +1,9 @@
 import dns from 'dns/promises';
+import { config } from '../config.js';
+
+// In-process DNS cache: domain → {result, expiresAt}
+const mxDnsCache = new Map();
+const MX_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
  * Identify known major email service providers that may conceal mailbox verification
@@ -38,57 +43,66 @@ export async function lookupMxInternal(domain, dnsClient = dns) {
 
   const cleanDomain = domain.toLowerCase().trim();
 
+  // Check in-process memory cache first (avoids repeated DNS round-trips)
+  const cached = mxDnsCache.get(cleanDomain);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.result;
+  }
+
+  const timeoutMs = config.verifier.mxTimeoutMs || 5000;
+
+  // Helper: race a promise against a timeout
+  function withTimeout(p) {
+    return Promise.race([
+      p,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('DNS timeout')), timeoutMs)
+      )
+    ]);
+  }
+
   // 1. Attempt MX lookup
   try {
-    const mxRecords = await dnsClient.resolveMx(cleanDomain);
+    const mxRecords = await withTimeout(dnsClient.resolveMx(cleanDomain));
     if (Array.isArray(mxRecords) && mxRecords.length > 0) {
       const sorted = mxRecords.sort((a, b) => a.priority - b.priority);
       const provider = identifyProvider(sorted);
-      return {
-        records: sorted,
-        isDead: false,
-        provider,
-        fallback: false
-      };
+      const result = { records: sorted, isDead: false, provider, fallback: false };
+      mxDnsCache.set(cleanDomain, { result, expiresAt: Date.now() + MX_CACHE_TTL_MS });
+      return result;
     }
   } catch (err) {
-    // If not ENODATA or ENOTFOUND, log error but proceed to fallback
     if (err.code !== 'ENODATA' && err.code !== 'ENOTFOUND') {
-      // transient or specific DNS failure
+      // transient DNS failure — fall through to A/AAAA
     }
   }
 
-  // 2. Fallback to A / AAAA lookup (RFC 5321 implicit MX)
+  // 2. Parallel A + AAAA fallback lookup
   try {
-    let hasIp = false;
-    try {
-      const ipv4 = await dnsClient.resolve4(cleanDomain);
-      if (ipv4 && ipv4.length > 0) hasIp = true;
-    } catch {}
+    const [ipv4Result, ipv6Result] = await Promise.allSettled([
+      withTimeout(dnsClient.resolve4(cleanDomain)),
+      withTimeout(dnsClient.resolve6(cleanDomain))
+    ]);
 
-    if (!hasIp) {
-      try {
-        const ipv6 = await dnsClient.resolve6(cleanDomain);
-        if (ipv6 && ipv6.length > 0) hasIp = true;
-      } catch {}
-    }
+    const hasIp =
+      (ipv4Result.status === 'fulfilled' && ipv4Result.value?.length > 0) ||
+      (ipv6Result.status === 'fulfilled' && ipv6Result.value?.length > 0);
 
     if (hasIp) {
       const fallbackRecords = [{ exchange: cleanDomain, priority: 0, isFallback: true }];
-      return {
-        records: fallbackRecords,
-        isDead: false,
-        provider: 'generic',
-        fallback: true
-      };
+      const result = { records: fallbackRecords, isDead: false, provider: 'generic', fallback: true };
+      mxDnsCache.set(cleanDomain, { result, expiresAt: Date.now() + MX_CACHE_TTL_MS });
+      return result;
     }
   } catch {}
 
   // No MX and no A/AAAA -> dead domain
-  return {
-    records: [],
-    isDead: true,
-    provider: 'generic',
-    fallback: false
-  };
+  const deadResult = { records: [], isDead: true, provider: 'generic', fallback: false };
+  mxDnsCache.set(cleanDomain, { result: deadResult, expiresAt: Date.now() + MX_CACHE_TTL_MS });
+  return deadResult;
+}
+
+/** Clear the in-process MX DNS cache (useful for tests) */
+export function clearMxCache() {
+  mxDnsCache.clear();
 }

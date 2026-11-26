@@ -69,13 +69,13 @@ export function calculateScoreAndVerdict(checks, context = {}) {
     };
   }
 
-  // If port 25 could not complete probe and no hard failure earlier
+  // If port 25 could not complete probe and no hard failure earlier,
+  // compute a real penalty-based score instead of a flat 50/UNKNOWN.
+  // The in-process caller (index.js) already builds this — but we also
+  // handle the fallthrough case here so calculateVerdict() is consistent.
   if (isPort25Blocked && (!smtpCheck || smtpCheck.status === 'unknown')) {
-    return {
-      score: 50,
-      verdict: VERDICTS.UNKNOWN,
-      reason: 'Port 25 outbound blocked or SMTP probe could not complete'
-    };
+    // Fall through to penalty accumulation below; verdict will be assigned
+    // based on computed score and catchall context.
   }
 
   // Calculate penalties from secondary risk factors
@@ -83,7 +83,8 @@ export function calculateScoreAndVerdict(checks, context = {}) {
   const reasons = [];
 
   for (const check of checks) {
-    if (check.status === 'warn' && check.penalty) {
+    // Count both 'warn' and 'unknown' status checks that carry a penalty
+    if ((check.status === 'warn' || check.status === 'unknown') && check.penalty) {
       totalPenalty += check.penalty;
       reasons.push(check.detail);
     }
@@ -104,6 +105,13 @@ export function calculateScoreAndVerdict(checks, context = {}) {
   if (context.providerHiddenStatus || context.isCatchall || context.isGreylisted || score < 80) {
     verdict = VERDICTS.RISKY;
     finalReason = reasons.length > 0 ? reasons.join('; ') : 'Mailbox marked risky due to provider policies or potential delivery constraints';
+  }
+
+  // When SMTP was unknown (port 25 blocked / connection failed) and not risky by other factors,
+  // use UNKNOWN verdict (not DELIVERABLE) since we could not confirm the mailbox exists.
+  if (isPort25Blocked && verdict === VERDICTS.DELIVERABLE) {
+    verdict = VERDICTS.UNKNOWN;
+    finalReason = reasons.length > 0 ? reasons.join('; ') : 'SMTP mailbox existence cannot be confirmed (port 25 blocked)';
   }
 
   return { score, verdict, reason: finalReason };
