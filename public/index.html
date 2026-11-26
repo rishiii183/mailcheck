@@ -190,10 +190,33 @@
           data: {
             labels,
             datasets: [
-              { label: 'Sent', data: sentData, borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.1)' },
-              { label: 'Opened', data: openedData, borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.1)' },
-              { label: 'Replied', data: repliedData, borderColor: '#8b5cf6', backgroundColor: 'rgba(139, 92, 246, 0.1)' }
+              { label: 'Sent', data: sentData, borderColor: '#6366f1', backgroundColor: 'rgba(99, 102, 241, 0.08)', tension: 0.35, borderWidth: 2, fill: true, pointBackgroundColor: '#6366f1', pointBorderColor: '#fff', pointHoverRadius: 6 },
+              { label: 'Opened', data: openedData, borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.08)', tension: 0.35, borderWidth: 2, fill: true, pointBackgroundColor: '#10b981', pointBorderColor: '#fff', pointHoverRadius: 6 },
+              { label: 'Replied', data: repliedData, borderColor: '#8b5cf6', backgroundColor: 'rgba(139, 92, 246, 0.08)', tension: 0.35, borderWidth: 2, fill: true, pointBackgroundColor: '#8b5cf6', pointBorderColor: '#fff', pointHoverRadius: 6 }
             ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: {
+                labels: {
+                  color: '#94a3b8',
+                  font: { family: 'Plus Jakarta Sans', size: 12, weight: 600 }
+                }
+              }
+            },
+            scales: {
+              x: {
+                grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                ticks: { color: '#64748b', font: { family: 'Plus Jakarta Sans', size: 11 } }
+              },
+              y: {
+                grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                ticks: { color: '#64748b', font: { family: 'Plus Jakarta Sans', size: 11 } },
+                beginAtZero: true
+              }
+            }
           }
         });
 

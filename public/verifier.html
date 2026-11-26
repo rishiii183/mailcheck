@@ -46,18 +46,19 @@
         <button class="btn btn-primary" onclick="verifySingle()" id="btnVerifySingle">Verify Email</button>
       </div>
 
-      <div id="singleResultContainer" style="display: none;">
-        <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px; background: rgba(15, 23, 42, 0.6); border-radius: 8px; margin-bottom: 20px;">
+      <div id="singleResultContainer" style="display: none; margin-top: 24px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 22px 24px; background: linear-gradient(135deg, rgba(30, 41, 59, 0.4) 0%, rgba(15, 23, 42, 0.7) 100%); border-radius: var(--radius-md); border: 1px solid var(--border); box-shadow: var(--shadow-card); margin-bottom: 24px; position: relative; overflow: hidden;">
+          <div style="position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);"></div>
           <div>
-            <div style="font-size: 18px; font-weight: 700;" id="singleResultEmail">user@example.com</div>
-            <div style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;" id="singleResultReason">Verdict reason</div>
+            <div style="font-size: 20px; font-weight: 800; letter-spacing: -0.03em; color: #fff;" id="singleResultEmail">user@example.com</div>
+            <div style="font-size: 13px; color: var(--text-secondary); margin-top: 6px; display: flex; align-items: center; gap: 8px;" id="singleResultReason">Verdict reason</div>
           </div>
-          <div style="display: flex; align-items: center; gap: 16px;">
+          <div style="display: flex; align-items: center; gap: 20px;">
             <div style="text-align: right;">
-              <div style="font-size: 11px; text-transform: uppercase; color: var(--text-secondary);">Quality Score</div>
-              <div style="font-size: 22px; font-weight: 700;" id="singleResultScore">100/100</div>
+              <div style="font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: 2px;">Quality Score</div>
+              <div style="font-size: 28px; font-weight: 800; letter-spacing: -0.04em; color: #fff;" id="singleResultScore">100/100</div>
             </div>
-            <div id="singleResultBadge" class="badge badge-deliverable" style="font-size: 14px; padding: 6px 14px;">DELIVERABLE</div>
+            <div id="singleResultBadge" class="badge badge-deliverable" style="font-size: 13px; padding: 7px 16px;">DELIVERABLE</div>
           </div>
         </div>
 
