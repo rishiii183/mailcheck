@@ -10,13 +10,14 @@ import { getPort25Status } from './verifier/smtp.js';
 import { createMailbox, getMailboxById, listMailboxes, updateMailbox, deleteMailbox, testMailboxConnection } from './mailboxes/accounts.js';
 import { checkMailboxDns } from './mailboxes/dns-check.js';
 import { getMailboxHealth, getWarmupPlan } from './warmup/health.js';
-import { createCampaign, getCampaign, listCampaigns, updateCampaign, launchCampaign, pauseCampaign, resumeCampaign, duplicateCampaign, deleteCampaign, previewStep } from './campaigns/sequence.js';
+import { createCampaign, getCampaign, listCampaigns, updateCampaign, launchCampaign, getLaunchStatus, pauseCampaign, resumeCampaign, duplicateCampaign, deleteCampaign, previewStep } from './campaigns/sequence.js';
 import { getOverviewStats, getCampaignStats, getCampaignLeads, getLeadTimeline } from './stats/queries.js';
 import { listReplies, labelReply, markReplyHandled } from './campaigns/replies.js';
 import { listSuppression, addSuppression, removeSuppression, importSuppression } from './campaigns/suppression.js';
 import { startEngine, stopEngine, runSchedulerTick } from './campaigns/engine.js';
 import { startReplyPoller, stopReplyPoller } from './campaigns/replies.js';
 import { startWarmupRunner, stopWarmupRunner } from './warmup/runner.js';
+import { importLeads, parseCsv } from './campaigns/leads.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -157,7 +158,7 @@ export function createAdminServer(options = {}) {
     if (listId) {
       const db = getDb();
       for (const res of results.results) {
-        db.prepare('INSERT OR IGNORE INTO leads (list_id, email, status) VALUES (?, ?, "active")').run(listId, res.email);
+        db.prepare("INSERT OR IGNORE INTO leads (list_id, email, status) VALUES (?, ?, 'active')").run(listId, res.email);
       }
     }
 
@@ -196,6 +197,48 @@ export function createAdminServer(options = {}) {
       ORDER BY l.id DESC
     `).all(request.params.id);
     return reply.send(leads);
+  });
+
+  fastify.post('/api/lists/:id/leads/import', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      let rows = [];
+      if (request.isMultipart()) {
+        const file = await request.file();
+        if (!file) {
+          return reply.status(400).send({ error: 'No file uploaded' });
+        }
+        const buf = await file.toBuffer();
+        rows = parseCsv(buf.toString('utf-8'));
+      } else if (request.body) {
+        if (Array.isArray(request.body.rows)) {
+          rows = request.body.rows;
+        } else if (typeof request.body.csv === 'string') {
+          rows = parseCsv(request.body.csv);
+        } else if (typeof request.body === 'string') {
+          rows = parseCsv(request.body);
+        } else {
+          return reply.status(400).send({ error: 'Invalid body: expected rows array or csv string' });
+        }
+      } else {
+        return reply.status(400).send({ error: 'Body or multipart file required' });
+      }
+
+      const result = importLeads(Number(request.params.id), rows);
+      return reply.send({ success: true, ...result });
+    } catch (err) {
+      const status = err.message && err.message.includes('not found') ? 404 : 400;
+      return reply.status(status).send({ error: err.message });
+    }
   });
 
   fastify.delete('/api/lists/:id', async (request, reply) => {
@@ -327,12 +370,45 @@ export function createAdminServer(options = {}) {
     return reply.send({ success: true });
   });
 
-  fastify.post('/api/campaigns/:id/launch', async (request, reply) => {
+  fastify.post('/api/campaigns/:id/launch', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string' }
+        }
+      }
+    }
+  }, async (request, reply) => {
     try {
-      const res = await launchCampaign(request.params.id);
+      const res = await launchCampaign(request.params.id, { async: true });
       return reply.send(res);
     } catch (err) {
-      return reply.status(400).send({ error: err.message });
+      const status = err.message && err.message.includes('not found') ? 404 : 400;
+      return reply.status(status).send({ error: err.message });
+    }
+  });
+
+  fastify.get('/api/campaigns/:id/launch-status', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const status = getLaunchStatus(request.params.id);
+      if (!status || status.status === 'not_found') {
+        return reply.status(404).send({ error: 'Campaign not found' });
+      }
+      return reply.send(status);
+    } catch (err) {
+      return reply.status(500).send({ error: err.message });
     }
   });
 
@@ -370,9 +446,24 @@ export function createAdminServer(options = {}) {
     return reply.send(leads);
   });
 
-  fastify.get('/api/campaigns/:id/leads/:leadId/timeline', async (request, reply) => {
-    const timeline = getLeadTimeline(request.params.id, request.params.leadId);
-    return reply.send(timeline);
+  fastify.get('/api/campaigns/:id/leads/:leadId/timeline', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id', 'leadId'],
+        properties: {
+          id: { type: 'string' },
+          leadId: { type: 'string' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const timeline = getLeadTimeline(request.params.leadId, request.params.id);
+      return reply.send(timeline);
+    } catch (err) {
+      return reply.status(500).send({ error: err.message });
+    }
   });
 
   fastify.get('/api/campaigns/:id/export', async (request, reply) => {
@@ -399,7 +490,25 @@ export function createAdminServer(options = {}) {
   });
 
   // Create new campaign from filtered segment (e.g., "opened_no_reply" or "never_opened")
-  fastify.post('/api/campaigns/:id/create-from-segment', async (request, reply) => {
+  fastify.post('/api/campaigns/:id/create-from-segment', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string' }
+        }
+      },
+      body: {
+        type: 'object',
+        required: ['segment'],
+        properties: {
+          segment: { type: 'string' },
+          name: { type: 'string' }
+        }
+      }
+    }
+  }, async (request, reply) => {
     const { segment, name } = request.body || {};
     const db = getDb();
     const origCampaign = getCampaign(request.params.id);
@@ -419,7 +528,7 @@ export function createAdminServer(options = {}) {
     const newListId = Number(listRes.lastInsertRowid);
 
     // Copy leads into new list
-    const insertLead = db.prepare('INSERT INTO leads (list_id, email, first_name, last_name, company, status) VALUES (?, ?, ?, ?, ?, "active")');
+    const insertLead = db.prepare("INSERT INTO leads (list_id, email, first_name, last_name, company, status) VALUES (?, ?, ?, ?, ?, 'active')");
     for (const lead of segmentLeads.items) {
       insertLead.run(newListId, lead.email, lead.first_name, lead.last_name, lead.company);
     }

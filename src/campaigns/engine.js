@@ -15,6 +15,15 @@ let isProcessingTick = false;
 const mailboxLastSendMap = new Map();
 
 /**
+ * Calculate random send gap between min and max seconds
+ */
+export function calculateRandomSendGap(minSeconds, maxSeconds) {
+  const min = Math.max(1, parseInt(minSeconds, 10) || 90);
+  const max = Math.max(min, parseInt(maxSeconds, 10) || 240);
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+/**
  * Perform a single execution tick of the campaign sending scheduler
  * @param {Object} [options] Options for testing (e.g. mockSend, ignoreSchedule, ignoreGaps)
  */
@@ -35,6 +44,24 @@ export async function runSchedulerTick(options = {}) {
   try {
     const db = getDb();
     const postalAddress = getSetting('postal_address') || '';
+
+    // 2.8 Sweeper: any lead_step in 'claimed' for > 10 min
+    // without message_id -> release to pending; with message_id -> mark sent
+    db.prepare(`
+      UPDATE lead_steps
+      SET status = 'pending', mailbox_id = NULL, last_error = 'Swept: claimed > 10m without message_id'
+      WHERE status = 'claimed'
+        AND scheduled_at <= datetime('now', '-10 minutes')
+        AND (message_id IS NULL OR message_id = '')
+    `).run();
+
+    db.prepare(`
+      UPDATE lead_steps
+      SET status = 'sent', sent_at = CURRENT_TIMESTAMP, last_error = 'Swept: claimed > 10m with message_id'
+      WHERE status = 'claimed'
+        AND scheduled_at <= datetime('now', '-10 minutes')
+        AND message_id IS NOT NULL AND message_id != ''
+    `).run();
 
     // Fetch active running campaigns
     const runningCampaigns = db.prepare("SELECT * FROM campaigns WHERE status = 'running'").all();
@@ -129,10 +156,18 @@ export async function runSchedulerTick(options = {}) {
 
         // Enforce gap between sends for this mailbox
         const nowMs = Date.now();
-        const lastSend = mailboxLastSendMap.get(selectedMailbox.id) || 0;
-        const minGapMs = (campaign.min_gap_seconds || 90) * 1000;
-        if (!options.ignoreGaps && (nowMs - lastSend < minGapMs)) {
-          continue;
+        if (!options.ignoreGaps) {
+          if (selectedMailbox.next_send_at) {
+            const nextSendTime = new Date(selectedMailbox.next_send_at).getTime();
+            if (nowMs < nextSendTime) {
+              continue;
+            }
+          }
+          const lastSend = mailboxLastSendMap.get(selectedMailbox.id) || 0;
+          const minGapMs = (campaign.min_gap_seconds || 90) * 1000;
+          if (nowMs - lastSend < minGapMs) {
+            continue;
+          }
         }
 
         // 4. ATOMIC CLAIM: DB Transaction guarantees step cannot be double-sent
@@ -160,6 +195,11 @@ export async function runSchedulerTick(options = {}) {
             options
           });
 
+          // 2.9 Random send gap persisted in DB
+          const gapSec = calculateRandomSendGap(campaign.min_gap_seconds, campaign.max_gap_seconds);
+          const nextSendIso = new Date(Date.now() + gapSec * 1000).toISOString();
+          db.prepare('UPDATE mailboxes SET next_send_at = ? WHERE id = ?').run(nextSendIso, selectedMailbox.id);
+          selectedMailbox.next_send_at = nextSendIso;
           mailboxLastSendMap.set(selectedMailbox.id, Date.now());
           results.sent++;
         } catch (err) {
@@ -175,6 +215,19 @@ export async function runSchedulerTick(options = {}) {
         }
       }
     }
+
+    // 2.8 Campaign completion: after each tick, mark a running campaign 'completed'
+    // when no lead_steps remain in pending, retrying or claimed
+    db.prepare(`
+      UPDATE campaigns
+      SET status = 'completed', updated_at = CURRENT_TIMESTAMP
+      WHERE status = 'running'
+        AND NOT EXISTS (
+          SELECT 1 FROM lead_steps
+          WHERE lead_steps.campaign_id = campaigns.id
+            AND lead_steps.status IN ('pending', 'retrying', 'claimed')
+        )
+    `).run();
   } catch (err) {
     console.error('Campaign scheduler error:', err);
   } finally {
@@ -427,7 +480,7 @@ export function handleSendFailure(stepId, email, retryCount, err, mailboxId) {
 /**
  * Schedule next step in the campaign sequence
  */
-function scheduleNextStep(currentStep, campaign) {
+export function scheduleNextStep(currentStep, campaign) {
   const db = getDb();
   const nextStep = db.prepare(`
     SELECT * FROM sequence_steps
@@ -452,15 +505,16 @@ function scheduleNextStep(currentStep, campaign) {
   if (variants.length === 0) return;
 
   const chosenVariant = variants[Math.floor(Math.random() * variants.length)];
-  const delayDays = nextStep.delay_days || 1;
+  const delayDays = nextStep.delay_days ?? 1;
+  const baseTime = currentStep.sent_at || new Date().toISOString();
 
   db.prepare(`
     INSERT OR IGNORE INTO lead_steps (
       campaign_id, lead_id, sequence_step_id, variant_id, status, scheduled_at
     ) VALUES (
-      ?, ?, ?, ?, 'pending', datetime('now', '+' || ? || ' days')
+      ?, ?, ?, ?, 'pending', datetime(?, '+' || ? || ' days')
     )
-  `).run(campaign.id, currentStep.lead_id, nextStep.id, chosenVariant.id, delayDays);
+  `).run(campaign.id, currentStep.lead_id, nextStep.id, chosenVariant.id, baseTime, delayDays);
 }
 
 /**

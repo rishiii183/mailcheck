@@ -277,9 +277,12 @@ export function updateMailbox(id, updates) {
 }
 
 /**
- * Delete a mailbox
+ * Delete a mailbox, safely nullifying lead_steps references so history is preserved
  */
 export function deleteMailbox(id) {
   const db = getDb();
+  db.prepare('UPDATE lead_steps SET mailbox_id = NULL WHERE mailbox_id = ?').run(id);
+  db.prepare('DELETE FROM campaign_mailboxes WHERE mailbox_id = ?').run(id);
+  db.prepare('DELETE FROM mailbox_sync WHERE mailbox_id = ?').run(id);
   return db.prepare('DELETE FROM mailboxes WHERE id = ?').run(id);
 }

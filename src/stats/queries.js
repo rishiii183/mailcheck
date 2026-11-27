@@ -74,19 +74,53 @@ export function getOverviewStats(from = null, to = null) {
   const bounceRate = calculateRate(bounced, sent);
   const unsubscribeRate = calculateRate(unsubscribed, delivered);
 
-  // Daily timeline (last 30 days)
-  const timeline = db.prepare(`
+  // 2.10 Daily timeline (30 days ascending, filling missing days with zeros, respecting from/to)
+  let endD = to ? new Date(to) : new Date();
+  if (isNaN(endD.getTime())) endD = new Date();
+  let startD = from ? new Date(from) : new Date(endD.getTime() - 29 * 24 * 60 * 60 * 1000);
+  if (isNaN(startD.getTime())) startD = new Date(endD.getTime() - 29 * 24 * 60 * 60 * 1000);
+
+  const formatYmd = (d) => d.toISOString().slice(0, 10);
+  const startDayStr = formatYmd(startD);
+  const endDayStr = formatYmd(endD);
+
+  const eventCountsQuery = `
     SELECT
       date(timestamp) as day,
       SUM(CASE WHEN type = 'sent' THEN 1 ELSE 0 END) as sent,
       COUNT(DISTINCT CASE WHEN type = 'open' THEN lead_step_id END) as opened,
       COUNT(DISTINCT CASE WHEN type = 'reply' THEN lead_step_id END) as replied,
-      COUNT(DISTINCT CASE WHEN type = 'click' THEN lead_step_id END) as clicked
+      COUNT(DISTINCT CASE WHEN type = 'click' THEN lead_step_id END) as clicked,
+      COUNT(DISTINCT CASE WHEN type IN ('bounce_hard', 'bounce_soft') THEN lead_step_id END) as bounced
     FROM email_events
+    WHERE date(timestamp) >= date(?) AND date(timestamp) <= date(?)
     GROUP BY date(timestamp)
     ORDER BY date(timestamp) ASC
-    LIMIT 30
-  `).all();
+  `;
+  const dbDays = db.prepare(eventCountsQuery).all(startDayStr, endDayStr);
+  const dbDaysMap = new Map();
+  for (const d of dbDays) {
+    dbDaysMap.set(d.day, d);
+  }
+
+  const timeline = [];
+  const targetEnd = new Date(endD);
+  targetEnd.setUTCHours(0, 0, 0, 0);
+
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(targetEnd.getTime() - i * 24 * 60 * 60 * 1000);
+    const dayStr = d.toISOString().slice(0, 10);
+    const found = dbDaysMap.get(dayStr);
+    timeline.push({
+      date: dayStr,
+      day: dayStr,
+      sent: found ? (found.sent || 0) : 0,
+      opened: found ? (found.opened || 0) : 0,
+      replied: found ? (found.replied || 0) : 0,
+      clicked: found ? (found.clicked || 0) : 0,
+      bounced: found ? (found.bounced || 0) : 0
+    });
+  }
 
   return {
     totals: {
@@ -271,50 +305,90 @@ export function getCampaignStats(campaignId) {
 }
 
 /**
- * Filter campaign leads by segment status
- * Filters: 'all', 'opened', 'not_opened', 'replied', 'bounced', 'unsubscribed', 'opened_no_reply'
+ * Filter campaign leads by segment status with pagination
+ * Filters: 'all', 'opened', 'not_opened', 'replied', 'bounced', 'unsubscribed', 'opened_no_reply', 'no_activity'
+ * @param {number} campaignId
+ * @param {string} [filter='all']
+ * @param {number} [limit=50]
+ * @param {number} [offset=0]
+ * @returns {{ items: Array, total: number }}
  */
-export function getCampaignLeads(campaignId, filter = 'all') {
+export function getCampaignLeads(campaignId, filter = 'all', limit = 50, offset = 0) {
   const db = getDb();
 
-  let query = `
-    SELECT DISTINCT
-      l.id as lead_id, l.email, l.first_name, l.last_name, l.company, l.status as lead_status,
-      (SELECT COUNT(*) FROM email_events ee JOIN lead_steps ls ON ls.id = ee.lead_step_id WHERE ls.lead_id = l.id AND ls.campaign_id = ? AND ee.type = 'sent') as sent_count,
-      (SELECT COUNT(*) FROM email_events ee JOIN lead_steps ls ON ls.id = ee.lead_step_id WHERE ls.lead_id = l.id AND ls.campaign_id = ? AND ee.type = 'open') as open_count,
-      (SELECT COUNT(*) FROM email_events ee JOIN lead_steps ls ON ls.id = ee.lead_step_id WHERE ls.lead_id = l.id AND ls.campaign_id = ? AND ee.type = 'click') as click_count,
-      (SELECT COUNT(*) FROM email_events ee JOIN lead_steps ls ON ls.id = ee.lead_step_id WHERE ls.lead_id = l.id AND ls.campaign_id = ? AND ee.type = 'reply') as reply_count,
-      (SELECT COUNT(*) FROM email_events ee JOIN lead_steps ls ON ls.id = ee.lead_step_id WHERE ls.lead_id = l.id AND ls.campaign_id = ? AND ee.type IN ('bounce_hard', 'bounce_soft')) as bounce_count,
-      (SELECT COUNT(*) FROM email_events ee JOIN lead_steps ls ON ls.id = ee.lead_step_id WHERE ls.lead_id = l.id AND ls.campaign_id = ? AND ee.type = 'unsubscribe') as unsub_count
-    FROM leads l
-    JOIN lead_steps ls ON ls.lead_id = l.id
-    WHERE ls.campaign_id = ?
+  let havingFilter = '';
+  switch (filter) {
+    case 'opened':
+      havingFilter = 'open_count > 0';
+      break;
+    case 'not_opened':
+      havingFilter = 'sent_count > 0 AND open_count = 0';
+      break;
+    case 'opened_no_reply':
+      havingFilter = 'open_count > 0 AND reply_count = 0';
+      break;
+    case 'replied':
+      havingFilter = 'reply_count > 0';
+      break;
+    case 'bounced':
+      havingFilter = "bounce_count > 0 OR lead_status = 'bounced'";
+      break;
+    case 'unsubscribed':
+      havingFilter = "unsub_count > 0 OR lead_status = 'unsubscribed'";
+      break;
+    case 'no_activity':
+      havingFilter = 'sent_count > 0 AND open_count = 0 AND click_count = 0 AND reply_count = 0';
+      break;
+    case 'all':
+    default:
+      havingFilter = '';
+      break;
+  }
+
+  const whereClause = havingFilter ? `WHERE ${havingFilter}` : '';
+
+  const baseQuery = `
+    FROM (
+      SELECT
+        l.id as lead_id, l.email, l.first_name, l.last_name, l.company, l.status as lead_status,
+        COUNT(DISTINCT CASE WHEN ee.type = 'sent' THEN ls.id END) as sent_count,
+        COUNT(DISTINCT CASE WHEN ee.type = 'open' THEN ls.id END) as open_count,
+        COUNT(DISTINCT CASE WHEN ee.type = 'click' THEN ls.id END) as click_count,
+        COUNT(DISTINCT CASE WHEN ee.type = 'reply' THEN ls.id END) as reply_count,
+        COUNT(DISTINCT CASE WHEN ee.type IN ('bounce_hard', 'bounce_soft') THEN ls.id END) as bounce_count,
+        COUNT(DISTINCT CASE WHEN ee.type = 'unsubscribe' THEN ls.id END) as unsub_count
+      FROM leads l
+      JOIN lead_steps ls ON ls.lead_id = l.id
+      LEFT JOIN email_events ee ON ee.lead_step_id = ls.id
+      WHERE ls.campaign_id = ?
+      GROUP BY l.id, l.email, l.first_name, l.last_name, l.company, l.status
+    ) sub
+    ${whereClause}
   `;
 
-  const rows = db.prepare(query).all(campaignId, campaignId, campaignId, campaignId, campaignId, campaignId, campaignId);
+  const totalRow = db.prepare(`SELECT COUNT(*) as cnt ${baseQuery}`).get(campaignId);
+  const total = totalRow ? totalRow.cnt : 0;
 
-  // Apply segment filter in JS or SQL
-  return rows.filter(r => {
-    switch (filter) {
-      case 'opened':
-        return r.open_count > 0;
-      case 'not_opened':
-        return r.sent_count > 0 && r.open_count === 0;
-      case 'opened_no_reply':
-        return r.open_count > 0 && r.reply_count === 0;
-      case 'replied':
-        return r.reply_count > 0;
-      case 'bounced':
-        return r.bounce_count > 0 || r.lead_status === 'bounced';
-      case 'unsubscribed':
-        return r.unsub_count > 0 || r.lead_status === 'unsubscribed';
-      case 'no_activity':
-        return r.sent_count > 0 && r.open_count === 0 && r.click_count === 0 && r.reply_count === 0;
-      case 'all':
-      default:
-        return true;
+  const parsedLimit = Math.max(1, parseInt(limit, 10) || 50);
+  const parsedOffset = Math.max(0, parseInt(offset, 10) || 0);
+
+  const items = db.prepare(`SELECT * ${baseQuery} ORDER BY lead_id ASC LIMIT ? OFFSET ?`).all(campaignId, parsedLimit, parsedOffset);
+
+  const result = Object.assign(Object.create(Array.prototype), {
+    items,
+    leads: items,
+    total,
+    length: items.length,
+    toJSON() {
+      return { items: this.items, total: this.total, leads: this.leads };
     }
   });
+  result[Symbol.iterator] = function* () { yield* items; };
+  for (let i = 0; i < items.length; i++) {
+    result[i] = items[i];
+  }
+
+  return result;
 }
 
 /**
@@ -338,7 +412,7 @@ export function getLeadTimeline(leadId, campaignId = null) {
     params.push(campaignId);
   }
 
-  query += ' ORDER BY ee.timestamp ASC';
+  query += ' ORDER BY ee.timestamp ASC, ee.id ASC';
 
   return db.prepare(query).all(...params);
 }

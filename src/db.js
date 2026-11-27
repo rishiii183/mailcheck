@@ -78,6 +78,7 @@ export function migrate(db) {
       daily_warmup_target INTEGER DEFAULT 40,
       warmup_start_date TEXT,
       campaign_daily_cap INTEGER DEFAULT 50,
+      next_send_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -224,7 +225,7 @@ export function migrate(db) {
       lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
       sequence_step_id INTEGER NOT NULL REFERENCES sequence_steps(id) ON DELETE CASCADE,
       variant_id INTEGER REFERENCES step_variants(id),
-      mailbox_id INTEGER REFERENCES mailboxes(id),
+      mailbox_id INTEGER REFERENCES mailboxes(id) ON DELETE SET NULL,
       status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'claimed', 'sent', 'retrying', 'skipped', 'failed'
       scheduled_at DATETIME NOT NULL,
       sent_at DATETIME,
@@ -299,12 +300,24 @@ export function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_warmup_events_mailbox ON warmup_events(mailbox_id, created_at);
   `);
 
-  // Migration for existing mailboxes table
+  // Migration for mailboxes table columns
   try {
     db.exec('ALTER TABLE mailboxes ADD COLUMN allow_self_signed INTEGER DEFAULT 0');
-  } catch (err) {
-    // Column already exists
-  }
+  } catch (err) {}
+  try {
+    db.exec('ALTER TABLE mailboxes ADD COLUMN next_send_at DATETIME');
+  } catch (err) {}
+
+  // Migration for duplicate leads removal and unique index on (list_id, email)
+  try {
+    db.exec(`
+      DELETE FROM leads
+      WHERE id NOT IN (
+        SELECT MIN(id) FROM leads GROUP BY list_id, email
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_list_email ON leads(list_id, email);
+    `);
+  } catch (err) {}
 
   // Initialize default settings if not existing
   const initSetting = db.prepare(`

@@ -4,6 +4,31 @@ import { canMailboxSend } from '../mailboxes/dns-check.js';
 import { renderSpintax, renderVariables, htmlToPlainText, injectTrackingAndFooter } from './render.js';
 import { prepareTracking } from './tracking.js';
 import { verifyEmail } from '../verifier/index.js';
+import { config } from '../config.js';
+import PQueue from 'p-queue';
+
+const launchJobs = new Map();
+
+/**
+ * Get background launch status and verification progress for a campaign
+ */
+export function getLaunchStatus(campaignId) {
+  const idNum = Number(campaignId);
+  const job = launchJobs.get(idNum);
+  if (job) return job;
+
+  const db = getDb();
+  const c = db.prepare('SELECT status FROM campaigns WHERE id = ?').get(idNum);
+  return {
+    campaignId: idNum,
+    status: c ? c.status : 'not_found',
+    total: 0,
+    verified: 0,
+    valid: 0,
+    invalid: 0,
+    progressPercent: (c?.status === 'running' || c?.status === 'completed') ? 100 : 0
+  };
+}
 
 /**
  * Create a new campaign with schedule and sequence configuration
@@ -214,8 +239,9 @@ export function updateCampaign(id, updates) {
 
 /**
  * Launch campaign with all compliance and safety checks
+ * When options.async is true, returns { status: 'preparing' } immediately and processes verification in background
  */
-export async function launchCampaign(campaignId) {
+export async function launchCampaign(campaignId, options = {}) {
   const db = getDb();
   const campaign = getCampaign(campaignId);
   if (!campaign) {
@@ -262,57 +288,143 @@ export async function launchCampaign(campaignId) {
     throw new Error('The selected list contains no active leads.');
   }
 
-  let scheduledCount = 0;
+  // Set status to 'preparing'
+  db.prepare("UPDATE campaigns SET status = 'preparing', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(campaignId);
+
+  const jobState = {
+    campaignId: Number(campaignId),
+    status: 'preparing',
+    total: rawLeads.length,
+    verified: 0,
+    valid: 0,
+    invalid: 0,
+    progressPercent: 0,
+    scheduledCount: 0,
+    error: null
+  };
+  launchJobs.set(Number(campaignId), jobState);
+
+  // If async requested (e.g. from HTTP route), start in background and return immediately
+  if (options.async) {
+    executeLaunchJob(campaign, rawLeads, firstStep, jobState).catch(err => {
+      console.error(`Background launch failed for campaign ${campaignId}:`, err.message);
+      jobState.status = 'error';
+      jobState.error = err.message;
+      try {
+        db.prepare("UPDATE campaigns SET status = 'draft', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(campaignId);
+      } catch {}
+    });
+
+    return {
+      success: true,
+      status: 'preparing',
+      message: 'Campaign launch initiated'
+    };
+  }
+
+  // Otherwise await synchronously for callers expecting direct execution
+  return await executeLaunchJob(campaign, rawLeads, firstStep, jobState);
+}
+
+/**
+ * Execute verification and scheduling job with bounded concurrency and 30-day cache check
+ */
+async function executeLaunchJob(campaign, rawLeads, firstStep, jobState) {
+  const db = getDb();
+  const queue = new PQueue({ concurrency: config.verifier?.bulkConcurrency || 8 });
+  const seenEmails = new Set();
+  const leadsToSchedule = [];
 
   for (const lead of rawLeads) {
     const email = lead.email.toLowerCase().trim();
 
-    // Check suppression list
+    // 2.5 De-duplicate by email across the list
+    if (seenEmails.has(email)) {
+      jobState.invalid++;
+      jobState.verified++;
+      jobState.progressPercent = Math.round((jobState.verified / jobState.total) * 100);
+      continue;
+    }
+    seenEmails.add(email);
+
     if (isSuppressed(email)) {
+      jobState.invalid++;
+      jobState.verified++;
+      jobState.progressPercent = Math.round((jobState.verified / jobState.total) * 100);
       continue;
     }
 
-    // Check verification status
-    let vRow = db.prepare('SELECT verdict FROM verification_results WHERE email = ?').get(email);
-    if (!vRow) {
-      // Auto-verify on the fly if no recent check exists
-      try {
-        const vResult = await verifyEmail(email);
-        vRow = { verdict: vResult.verdict };
-      } catch {
-        continue;
+    queue.add(async () => {
+      // 2.6 Treat stored verification as valid ONLY if checked_at is within the last 30 days
+      let vRow = db.prepare(`
+        SELECT verdict FROM verification_results
+        WHERE email = ? AND checked_at >= datetime('now', '-30 days')
+      `).get(email);
+
+      if (!vRow) {
+        try {
+          const vResult = await verifyEmail(email);
+          vRow = { verdict: vResult.verdict };
+        } catch {
+          jobState.invalid++;
+          jobState.verified++;
+          jobState.progressPercent = Math.round((jobState.verified / jobState.total) * 100);
+          return;
+        }
       }
-    }
 
-    // Policy check: "deliverable_only" (default) or "deliverable_and_risky"
-    if (campaign.send_policy === 'deliverable_only' && vRow.verdict !== 'deliverable') {
-      continue;
-    }
-    if (campaign.send_policy === 'deliverable_and_risky' && !['deliverable', 'risky'].includes(vRow.verdict)) {
-      continue;
-    }
+      jobState.verified++;
+      jobState.progressPercent = Math.round((jobState.verified / jobState.total) * 100);
 
-    // Select random variant by weight
-    const variant = selectVariantWeighted(firstStep.variants);
+      // Policy check: "deliverable_only" (default) or "deliverable_and_risky"
+      let isAllowed = false;
+      if (campaign.send_policy === 'deliverable_only' && vRow.verdict === 'deliverable') {
+        isAllowed = true;
+      } else if (campaign.send_policy === 'deliverable_and_risky' && ['deliverable', 'risky'].includes(vRow.verdict)) {
+        isAllowed = true;
+      }
 
-    // Schedule step 1 in lead_steps table
-    try {
-      db.prepare(`
-        INSERT OR IGNORE INTO lead_steps (
-          campaign_id, lead_id, sequence_step_id, variant_id, status, scheduled_at
-        ) VALUES (?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
-      `).run(campaignId, lead.id, firstStep.id, variant.id);
-      scheduledCount++;
-    } catch {
-      // Ignore if already scheduled
-    }
+      if (isAllowed) {
+        jobState.valid++;
+        leadsToSchedule.push(lead);
+      } else {
+        jobState.invalid++;
+      }
+    });
   }
 
-  if (scheduledCount === 0) {
+  await queue.onIdle();
+
+  if (leadsToSchedule.length === 0) {
+    jobState.status = 'error';
+    jobState.error = 'No leads met the send policy criteria (deliverable/unsuppressed).';
+    db.prepare("UPDATE campaigns SET status = 'draft', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(campaign.id);
     throw new Error('No leads met the send policy criteria (deliverable/unsuppressed).');
   }
 
-  db.prepare("UPDATE campaigns SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(campaignId);
+  // Schedule step 1 in lead_steps table
+  let scheduledCount = 0;
+  const insertStep = db.prepare(`
+    INSERT OR IGNORE INTO lead_steps (
+      campaign_id, lead_id, sequence_step_id, variant_id, status, scheduled_at
+    ) VALUES (?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+  `);
+
+  const tx = db.transaction((leads) => {
+    for (const lead of leads) {
+      const variant = selectVariantWeighted(firstStep.variants);
+      const res = insertStep.run(campaign.id, lead.id, firstStep.id, variant.id);
+      if (res.changes > 0) scheduledCount++;
+    }
+  });
+
+  tx(leadsToSchedule);
+
+  jobState.scheduledCount = scheduledCount;
+  jobState.status = 'running';
+  jobState.progressPercent = 100;
+
+  db.prepare("UPDATE campaigns SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(campaign.id);
 
   return {
     success: true,
