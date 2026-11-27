@@ -4,6 +4,10 @@ import { config } from './config.js';
 import { getDb } from './db.js';
 import { hashIp } from './crypto.js';
 import { addSuppression } from './campaigns/suppression.js';
+import { detectBot, isProbableBot, isGmailProxy } from './campaigns/tracking.js';
+
+// Re-export bot detection utilities from unified tracking module
+export { detectBot, isProbableBot, isGmailProxy };
 
 // 1x1 Transparent GIF buffer
 const PIXEL_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
@@ -19,43 +23,6 @@ export function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-}
-
-/**
- * Detect probable automated/bot opens (Apple MPP, GoogleImageProxy, or instant hits <= 5s)
- */
-export function isProbableBot(userAgent, sentAt, requestTime = new Date()) {
-  const ua = (userAgent || '').toLowerCase();
-
-  // Known proxy & crawler user-agents
-  if (
-    ua.includes('googleimageproxy') ||
-    ua.includes('applemailprivacy') ||
-    ua.includes('bingpreview') ||
-    ua.includes('yahoo! slurp') ||
-    ua.includes('facebookexternalhit') ||
-    ua.includes('spider') ||
-    ua.includes('bot')
-  ) {
-    return true;
-  }
-
-  // Apple Mail Privacy Protection often uses generic Mac OS X User-Agent pattern with no browser sub-version
-  if (ua.includes('macintosh') && !ua.includes('chrome') && !ua.includes('firefox') && !ua.includes('version/')) {
-    return true;
-  }
-
-  // Request within 5 seconds of email sent time
-  if (sentAt) {
-    const sentTime = new Date(sentAt).getTime();
-    const reqTime = requestTime.getTime();
-    const diffMs = reqTime - sentTime;
-    if (diffMs >= 0 && diffMs <= 5000) {
-      return true;
-    }
-  }
-
-  return false;
 }
 
 /**
@@ -91,11 +58,13 @@ export function createPublicServer(options = {}) {
         const step = db.prepare('SELECT id, sent_at FROM lead_steps WHERE open_token = ?').get(token);
 
         if (step) {
-          const bot = isProbableBot(userAgent, step.sent_at);
+          const botInfo = detectBot(userAgent, step.sent_at);
           const meta = JSON.stringify({
             user_agent: userAgent,
             ip_hash: ipHashed,
-            is_probable_bot: bot ? 1 : 0
+            is_probable_bot: botInfo.isBot ? 1 : 0,
+            is_gmail_proxy: botInfo.isGmailProxy ? 1 : 0,
+            bot_reason: botInfo.reason
           });
 
           db.prepare(`
@@ -131,13 +100,15 @@ export function createPublicServer(options = {}) {
         }
 
         const step = db.prepare('SELECT id, sent_at FROM lead_steps WHERE id = ?').get(link.lead_step_id);
-        const bot = isProbableBot(userAgent, step ? step.sent_at : null);
+        const botInfo = detectBot(userAgent, step ? step.sent_at : null);
 
         const meta = JSON.stringify({
           user_agent: userAgent,
           ip_hash: ipHashed,
           url: link.original_url,
-          is_probable_bot: bot ? 1 : 0
+          is_probable_bot: botInfo.isBot ? 1 : 0,
+          is_gmail_proxy: botInfo.isGmailProxy ? 1 : 0,
+          bot_reason: botInfo.reason
         });
 
         db.prepare(`
