@@ -201,13 +201,13 @@ describe('End-to-End Integration Suite (Step 9)', () => {
     assert.equal(stats.totals.clicked, 1);
     assert.equal(stats.totals.replied, 1);
 
-    // 1 open / 1 delivered = 100% open rate
-    assert.equal(stats.rates.openRate, 100);
-    // 1 click / 1 delivered = 100% click rate
-    assert.equal(stats.rates.clickRate, 100);
-    // 1 reply / 1 delivered = 100% reply rate
-    assert.equal(stats.rates.replyRate, 100);
-    // 1 bounce / 2 sent = 50% bounce rate
+    // 1 open / 2 contacted = 50% open rate
+    assert.equal(stats.rates.openRate, 50);
+    // 1 click / 2 contacted = 50% click rate
+    assert.equal(stats.rates.clickRate, 50);
+    // 1 reply / 2 contacted = 50% reply rate
+    assert.equal(stats.rates.replyRate, 50);
+    // 1 bounce / 2 contacted = 50% bounce rate
     assert.equal(stats.rates.bounceRate, 50);
   });
 

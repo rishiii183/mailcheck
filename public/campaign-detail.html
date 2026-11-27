@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <script src="/vendor/auth.js"></script>
   <meta charset="UTF-8">
   <title>MailCheck — Campaign Detail</title>
   <link rel="stylesheet" href="/css/style.css">
@@ -36,8 +37,9 @@
     <!-- Funnel KPI Cards -->
     <div class="kpi-grid">
       <div class="kpi-card">
-        <div class="kpi-label">Total Leads</div>
-        <div class="kpi-value" id="funnelLeads">0</div>
+        <div class="kpi-label">Contacted</div>
+        <div class="kpi-value" id="funnelContacted">0</div>
+        <div class="kpi-sub"><span id="funnelLeads">0</span> total leads</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Delivered</div>
@@ -45,9 +47,14 @@
         <div class="kpi-sub"><span id="funnelSent">0</span> sent</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Unique Opens</div>
+        <div class="kpi-label">Opens (estimated)</div>
+        <div class="kpi-value" id="funnelOpenRateAny">0%</div>
+        <div class="kpi-sub"><span id="funnelOpensAny">0</span> opens (<span id="funnelGmailProxy">0</span> Gmail proxy)*</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Opens (verified human)</div>
         <div class="kpi-value" id="funnelOpenRate">0%</div>
-        <div class="kpi-sub"><span id="funnelOpens">0</span> opened</div>
+        <div class="kpi-sub"><span id="funnelOpens">0</span> verified human*</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Clicks</div>
@@ -64,6 +71,10 @@
         <div class="kpi-value" id="funnelBounceRate">0%</div>
         <div class="kpi-sub"><span id="funnelBounces">0</span> bounced</div>
       </div>
+    </div>
+
+    <div style="font-size: 11px; color: var(--text-muted); margin-top: -12px; margin-bottom: 24px;">
+      * Open rates are statistical estimates due to privacy protections (Apple Mail Privacy Protection, Google Image Proxy) and automated mail scanning.
     </div>
 
     <!-- Sequence Steps Breakdown -->
@@ -210,11 +221,23 @@
         }
 
         // Funnel stats
-        document.getElementById('funnelLeads').textContent = s.leads.toLocaleString();
+        document.getElementById('funnelContacted').textContent = (s.contacted || s.leads || 0).toLocaleString();
+        document.getElementById('funnelLeads').textContent = (s.leads || 0).toLocaleString();
         document.getElementById('funnelDelivered').textContent = s.delivered.toLocaleString();
-        document.getElementById('funnelSent').textContent = s.sent.toLocaleString();
+        document.getElementById('funnelSent').textContent = (s.emailsSent || s.sent || 0).toLocaleString();
+        
+        // Opens (estimated)
+        const openRateAnyEl = document.getElementById('funnelOpenRateAny');
+        if (openRateAnyEl) openRateAnyEl.textContent = `${(s.rates.openRateAny ?? s.rates.openRate)}%`;
+        const opensAnyEl = document.getElementById('funnelOpensAny');
+        if (opensAnyEl) opensAnyEl.textContent = (s.openedAny ?? s.uniqueOpens ?? s.opened).toLocaleString();
+        const gmailProxyEl = document.getElementById('funnelGmailProxy');
+        if (gmailProxyEl) gmailProxyEl.textContent = (s.gmailProxyOpens || 0).toLocaleString();
+
+        // Opens (verified human)
         document.getElementById('funnelOpenRate').textContent = `${s.rates.openRate}%`;
-        document.getElementById('funnelOpens').textContent = s.opened.toLocaleString();
+        document.getElementById('funnelOpens').textContent = (s.openedHuman ?? s.opened).toLocaleString();
+
         document.getElementById('funnelClickRate').textContent = `${s.rates.clickRate}%`;
         document.getElementById('funnelClicks').textContent = s.clicked.toLocaleString();
         document.getElementById('funnelReplyRate').textContent = `${s.rates.replyRate}%`;

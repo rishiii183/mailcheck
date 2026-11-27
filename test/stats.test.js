@@ -87,18 +87,22 @@ describe('Stats Queries & Aggregations (Step 7)', () => {
       // Unsubscribed = 1 (Lead 4)
       assert.equal(stats.totals.unsubscribed, 1);
 
-      // Open rate: 2 / 3 = 66.7%
-      assert.equal(stats.rates.openRate, 66.7);
-      // Likely real open rate: 1 / 3 = 33.3%
-      assert.equal(stats.rates.likelyRealOpenRate, 33.3);
-      // Bounce rate: 1 / 4 = 25%
+      // Under Batch 3 definitions: denominator is contacted (4 leads)
+      // Open rate (verified human): 1 / 4 = 25.0%
+      assert.equal(stats.rates.openRate, 25.0);
+      // Open rate (any, incl. machine): 2 / 4 = 50.0%
+      assert.equal(stats.rates.openRateAny, 50.0);
+      // Likely real open rate alias: 1 / 4 = 25.0%
+      assert.equal(stats.rates.likelyRealOpenRate, 25.0);
+      // Bounce rate: 1 / 4 = 25.0%
       assert.equal(stats.rates.bounceRate, 25.0);
-      // Click rate: 1 / 3 = 33.3%
-      assert.equal(stats.rates.clickRate, 33.3);
-      // Reply rate: 1 / 3 = 33.3%
-      assert.equal(stats.rates.replyRate, 33.3);
-      // Unsubscribe rate: 1 / 3 = 33.3%
-      assert.equal(stats.rates.unsubscribeRate, 33.3);
+      // Click rate: 1 / 4 = 25.0%
+      assert.equal(stats.rates.clickRate, 25.0);
+      // Reply rate: 1 / 4 = 25.0%
+      assert.equal(stats.rates.replyRate, 25.0);
+      // Unsubscribe rate: 1 / 4 = 25.0%
+      assert.equal(stats.rates.unsubscribeRate, 25.0);
+      assert.equal(stats.rates.denominator, 'per_lead');
 
       assert.ok(stats.disclaimer);
     });

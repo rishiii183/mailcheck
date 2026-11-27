@@ -6,31 +6,55 @@ const mxDnsCache = new Map();
 const MX_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
- * Identify known major email service providers that may conceal mailbox verification
+ * Identify known major email service providers that conceal mailbox verification.
+ * 4.5 Rule: pphosted.com / Proofpoint is NOT 'outlook'; only *.mail.protection.outlook.com,
+ * hotmail/outlook/live MX hosts, *.yahoodns.net, and *.mail.me.com are mapped.
  */
 export function identifyProvider(mxList) {
+  if (!mxList || !Array.isArray(mxList)) return 'generic';
+
   for (const mx of mxList) {
-    const host = (mx.exchange || '').toLowerCase();
-    if (host.includes('google.com') || host.includes('googlemail.com') || host.includes('aspmx.l.google.com')) {
+    const host = (mx.exchange || '').toLowerCase().trim();
+
+    if (
+      host.includes('google.com') ||
+      host.includes('googlemail.com') ||
+      host.includes('aspmx.l.google.com')
+    ) {
       return 'google';
     }
-    if (host.includes('protection.outlook.com') || host.includes('hotmail.com') || host.includes('office365.com') || host.includes('pphosted.com')) {
+
+    // Explicitly exclude Proofpoint from being identified as Outlook
+    if (host.includes('pphosted.com') || host.includes('proofpoint.com')) {
+      return 'proofpoint';
+    }
+
+    if (
+      host.endsWith('.mail.protection.outlook.com') ||
+      host.includes('hotmail.') ||
+      host.includes('outlook.') ||
+      host.includes('live.')
+    ) {
       return 'outlook';
     }
-    if (host.includes('yahoodns.net') || host.includes('yahoo.com')) {
+
+    if (host.includes('yahoodns.net') || host.endsWith('yahoodns.net')) {
       return 'yahoo';
     }
-    if (host.includes('mail.me.com') || host.includes('icloud.com')) {
+
+    if (host.includes('mail.me.com') || host.endsWith('mail.me.com')) {
       return 'icloud';
     }
   }
+
   return 'generic';
 }
 
 /**
- * Resolves MX records for a domain, falling back to A/AAAA if none present
- * @param {string} domain 
- * @returns {Promise<{ records: Array<{exchange: string, priority: number, isFallback?: boolean}>, isDead: boolean, provider: string, fallback: boolean }>}
+ * Resolves MX records for a domain, falling back to A/AAAA if none present.
+ * 4.6 Rule: Only ENOTFOUND/NXDOMAIN (and ENODATA for both MX and A/AAAA) means dead domain.
+ * Timeouts, SERVFAIL, REFUSED are transient DNS failures that must NOT be marked dead
+ * and must NOT be cached.
  */
 export function lookupMx(domain) {
   return lookupMxInternal(domain, dns);
@@ -38,12 +62,12 @@ export function lookupMx(domain) {
 
 export async function lookupMxInternal(domain, dnsClient = dns) {
   if (!domain) {
-    return { records: [], isDead: true, provider: 'generic', fallback: false };
+    return { records: [], isDead: true, isTransientDnsError: false, provider: 'generic', fallback: false };
   }
 
   const cleanDomain = domain.toLowerCase().trim();
 
-  // Check in-process memory cache first (avoids repeated DNS round-trips)
+  // Check in-process memory cache first
   const cached = mxDnsCache.get(cleanDomain);
   if (cached && Date.now() < cached.expiresAt) {
     return cached.result;
@@ -51,15 +75,37 @@ export async function lookupMxInternal(domain, dnsClient = dns) {
 
   const timeoutMs = config.verifier.mxTimeoutMs || 5000;
 
-  // Helper: race a promise against a timeout
   function withTimeout(p) {
     return Promise.race([
       p,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('DNS timeout')), timeoutMs)
-      )
+      new Promise((_, reject) => {
+        const timer = setTimeout(() => {
+          const err = new Error('DNS timeout');
+          err.code = 'ETIMEOUT';
+          reject(err);
+        }, timeoutMs);
+        if (typeof timer.unref === 'function') timer.unref();
+      })
     ]);
   }
+
+  function isTransientError(err) {
+    if (!err) return false;
+    const code = err.code || '';
+    const msg = (err.message || '').toLowerCase();
+    return (
+      code === 'ETIMEOUT' ||
+      code === 'ESERVFAIL' ||
+      code === 'EREFUSED' ||
+      code === 'ECONNREFUSED' ||
+      code === 'ETIMEDOUT' ||
+      msg.includes('timeout') ||
+      msg.includes('servfail') ||
+      msg.includes('refused')
+    );
+  }
+
+  let mxError = null;
 
   // 1. Attempt MX lookup
   try {
@@ -67,19 +113,20 @@ export async function lookupMxInternal(domain, dnsClient = dns) {
     if (Array.isArray(mxRecords) && mxRecords.length > 0) {
       const sorted = mxRecords.sort((a, b) => a.priority - b.priority);
       const provider = identifyProvider(sorted);
-      const result = { records: sorted, isDead: false, provider, fallback: false };
+      const result = { records: sorted, isDead: false, isTransientDnsError: false, provider, fallback: false };
       mxDnsCache.set(cleanDomain, { result, expiresAt: Date.now() + MX_CACHE_TTL_MS });
       return result;
     }
   } catch (err) {
-    if (err.code !== 'ENODATA' && err.code !== 'ENOTFOUND') {
-      // transient DNS failure — fall through to A/AAAA
-    }
+    mxError = err;
   }
 
   // 2. Parallel A + AAAA fallback lookup
+  let ipv4Result = null;
+  let ipv6Result = null;
+
   try {
-    const [ipv4Result, ipv6Result] = await Promise.allSettled([
+    [ipv4Result, ipv6Result] = await Promise.allSettled([
       withTimeout(dnsClient.resolve4(cleanDomain)),
       withTimeout(dnsClient.resolve6(cleanDomain))
     ]);
@@ -90,14 +137,33 @@ export async function lookupMxInternal(domain, dnsClient = dns) {
 
     if (hasIp) {
       const fallbackRecords = [{ exchange: cleanDomain, priority: 0, isFallback: true }];
-      const result = { records: fallbackRecords, isDead: false, provider: 'generic', fallback: true };
+      const result = { records: fallbackRecords, isDead: false, isTransientDnsError: false, provider: 'generic', fallback: true };
       mxDnsCache.set(cleanDomain, { result, expiresAt: Date.now() + MX_CACHE_TTL_MS });
       return result;
     }
-  } catch {}
+  } catch (fallbackErr) {
+    // If all failed
+  }
 
-  // No MX and no A/AAAA -> dead domain
-  const deadResult = { records: [], isDead: true, provider: 'generic', fallback: false };
+  // Check if failure was transient (timeout, SERVFAIL, REFUSED)
+  const isMxTransient = isTransientError(mxError);
+  const isA4Transient = ipv4Result?.status === 'rejected' && isTransientError(ipv4Result.reason);
+  const isA6Transient = ipv6Result?.status === 'rejected' && isTransientError(ipv6Result.reason);
+
+  if (isMxTransient && (isA4Transient || isA6Transient || (!ipv4Result && !ipv6Result))) {
+    const errCode = mxError?.code || (ipv4Result?.status === 'rejected' ? ipv4Result.reason?.code : 'ETIMEOUT') || 'DNS_TRANSIENT_FAILURE';
+    return {
+      records: [],
+      isDead: false,
+      isTransientDnsError: true,
+      dnsError: errCode,
+      provider: 'generic',
+      fallback: false
+    };
+  }
+
+  // Only ENOTFOUND, NXDOMAIN, or ENODATA across both MX and A/AAAA means dead domain
+  const deadResult = { records: [], isDead: true, isTransientDnsError: false, provider: 'generic', fallback: false };
   mxDnsCache.set(cleanDomain, { result: deadResult, expiresAt: Date.now() + MX_CACHE_TTL_MS });
   return deadResult;
 }

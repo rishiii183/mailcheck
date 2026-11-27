@@ -25,9 +25,7 @@ export async function testMailboxConnection(params) {
         pass: params.smtp_pass
       },
       connectionTimeout: 10000,
-      tls: {
-        rejectUnauthorized: false // Allow self-signed or custom dev setups
-      }
+      tls: params.allow_self_signed ? { rejectUnauthorized: false } : undefined
     });
 
     await transporter.verify();
@@ -47,9 +45,7 @@ export async function testMailboxConnection(params) {
         pass: params.imap_pass
       },
       logger: false,
-      tls: {
-        rejectUnauthorized: false
-      }
+      tls: params.allow_self_signed ? { rejectUnauthorized: false } : undefined
     });
 
     await client.connect();
@@ -94,12 +90,14 @@ export async function createMailbox(data, options = {}) {
       email, display_name,
       smtp_host, smtp_port, smtp_secure, smtp_user, smtp_pass_encrypted,
       imap_host, imap_port, imap_secure, imap_user, imap_pass_encrypted,
-      status, daily_warmup_target, warmup_start_date, campaign_daily_cap
+      status, daily_warmup_target, warmup_start_date, campaign_daily_cap,
+      allow_self_signed, dkim_selector, allow_failed_dns
     ) VALUES (
       ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
-      ?, ?, ?, ?
+      ?, ?, ?, ?,
+      ?, ?, ?
     )
   `);
 
@@ -122,7 +120,10 @@ export async function createMailbox(data, options = {}) {
     initialStatus,
     data.daily_warmup_target || 40,
     warmupStartDate,
-    data.campaign_daily_cap || 50
+    data.campaign_daily_cap || 50,
+    data.allow_self_signed ? 1 : 0,
+    data.dkim_selector ? data.dkim_selector.trim() : null,
+    data.allow_failed_dns ? 1 : 0
   );
 
   const mailboxId = Number(res.lastInsertRowid);
@@ -185,7 +186,10 @@ export function listMailboxes() {
     `).get(row.id);
 
     item.dns = dnsRow || null;
-    item.canSend = dnsRow ? (dnsRow.spf_status !== 'fail' && dnsRow.dkim_status !== 'fail') : true;
+    // 6.1 Rule: Allow sending despite DKIM/SPF failure if allow_failed_dns is enabled
+    item.canSend = Boolean(row.allow_failed_dns)
+      ? true
+      : (dnsRow ? (dnsRow.spf_status !== 'fail' && dnsRow.dkim_status !== 'fail') : true);
     item.limits = getMailboxLimits(row);
 
     return item;
@@ -251,7 +255,8 @@ export function updateMailbox(id, updates) {
     fields.push('status = ?');
     values.push(updates.status);
     if (updates.status === 'warming' && !existing.warmup_start_date) {
-      fields.push('warmup_start_date = CURRENT_TIMESTAMP');
+      fields.push('warmup_start_date = ?');
+      values.push(new Date().toISOString());
     }
   }
   if (updates.daily_warmup_target !== undefined) {
@@ -261,6 +266,18 @@ export function updateMailbox(id, updates) {
   if (updates.campaign_daily_cap !== undefined) {
     fields.push('campaign_daily_cap = ?');
     values.push(parseInt(updates.campaign_daily_cap, 10));
+  }
+  if (updates.allow_self_signed !== undefined) {
+    fields.push('allow_self_signed = ?');
+    values.push(updates.allow_self_signed ? 1 : 0);
+  }
+  if (updates.dkim_selector !== undefined) {
+    fields.push('dkim_selector = ?');
+    values.push(updates.dkim_selector ? updates.dkim_selector.trim() : null);
+  }
+  if (updates.allow_failed_dns !== undefined) {
+    fields.push('allow_failed_dns = ?');
+    values.push(updates.allow_failed_dns ? 1 : 0);
   }
 
   if (fields.length === 0) return getMailboxById(id);
@@ -274,9 +291,12 @@ export function updateMailbox(id, updates) {
 }
 
 /**
- * Delete a mailbox
+ * Delete a mailbox, safely nullifying lead_steps references so history is preserved
  */
 export function deleteMailbox(id) {
   const db = getDb();
+  db.prepare('UPDATE lead_steps SET mailbox_id = NULL WHERE mailbox_id = ?').run(id);
+  db.prepare('DELETE FROM campaign_mailboxes WHERE mailbox_id = ?').run(id);
+  db.prepare('DELETE FROM mailbox_sync WHERE mailbox_id = ?').run(id);
   return db.prepare('DELETE FROM mailboxes WHERE id = ?').run(id);
 }

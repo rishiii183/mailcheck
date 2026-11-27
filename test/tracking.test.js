@@ -111,7 +111,7 @@ describe('Tracking & Public Server (Step 5)', () => {
   });
 
   describe('4. Unsubscribe Route /u/:token', () => {
-    it('GET /u/:token suppresses email and serves HTML confirmation page', async () => {
+    it('GET /u/:token serves HTML confirmation form and leaves suppression untouched', async () => {
       assert.equal(isSuppressed('target@example.com'), false);
 
       const res = await server.inject({
@@ -121,27 +121,36 @@ describe('Tracking & Public Server (Step 5)', () => {
 
       assert.equal(res.statusCode, 200);
       assert.ok(res.headers['content-type'].includes('text/html'));
-      assert.ok(res.body.includes('You have been unsubscribed'));
+      assert.ok(res.body.includes('Unsubscribe Confirmation'));
       assert.ok(res.body.includes('target@example.com'));
 
-      // Verify email is now globally suppressed
-      assert.equal(isSuppressed('target@example.com'), true);
+      // Verify email is NOT suppressed on GET
+      assert.equal(isSuppressed('target@example.com'), false);
 
-      // Verify event was logged
+      // Verify NO event was logged on GET
       const unsubs = db.prepare("SELECT * FROM email_events WHERE type = 'unsubscribe' AND lead_step_id = 1").all();
-      assert.ok(unsubs.length >= 1);
+      assert.equal(unsubs.length, 0);
     });
 
-    it('POST /u/:token handles RFC 8058 one-click unsubscribe', async () => {
+    it('POST /u/:token handles RFC 8058 one-click unsubscribe and suppresses lead', async () => {
       const res = await server.inject({
         method: 'POST',
         url: '/u/test_open_token_128',
-        body: {}
+        headers: {
+          'list-unsubscribe-post': 'List-Unsubscribe=One-Click'
+        }
       });
 
       assert.equal(res.statusCode, 200);
       const json = JSON.parse(res.body);
       assert.equal(json.success, true);
+
+      // Verify email is now globally suppressed
+      assert.equal(isSuppressed('target@example.com'), true);
+
+      // Verify event was logged exactly once
+      const unsubs = db.prepare("SELECT * FROM email_events WHERE type = 'unsubscribe' AND lead_step_id = 1").all();
+      assert.equal(unsubs.length, 1);
     });
   });
 });

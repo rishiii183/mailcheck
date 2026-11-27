@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <script src="/vendor/auth.js"></script>
   <meta charset="UTF-8">
   <title>MailCheck — Cold-Email Dashboard</title>
   <link rel="stylesheet" href="/css/style.css">
@@ -51,14 +52,14 @@
         <div class="kpi-sub" id="kpiDelivered">0 delivered</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Unique Opens</div>
+        <div class="kpi-label">Opens (estimated)</div>
         <div class="kpi-value" id="kpiOpenRate">0%</div>
-        <div class="kpi-sub"><span id="kpiOpens">0</span> unique opens*</div>
+        <div class="kpi-sub"><span id="kpiOpens">0</span> opens (<span id="kpiGmailProxy">0</span> Gmail proxy)*</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Likely Real Opens</div>
+        <div class="kpi-label">Opens (verified human)</div>
         <div class="kpi-value" id="kpiRealOpenRate">0%</div>
-        <div class="kpi-sub"><span id="kpiRealOpens">0</span> non-bot opens*</div>
+        <div class="kpi-sub"><span id="kpiRealOpens">0</span> verified human*</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Click Rate</div>
@@ -125,10 +126,24 @@
         const container = document.getElementById('bannerContainer');
         container.innerHTML = '';
 
-        if (!data.port25.available) {
+        if (!data.port25.checked) {
+          container.innerHTML += `
+            <div class="banner banner-info" style="background:rgba(59,130,246,0.15); border-left:4px solid #3b82f6; padding:12px; margin-bottom:12px; border-radius:6px;">
+              <span>ℹ️ <strong>Port 25 Check:</strong> Checking outbound port 25 availability...</span>
+            </div>
+          `;
+        } else if (!data.port25.available) {
           container.innerHTML += `
             <div class="banner banner-warning">
               <span>⚠️ <strong>Port 25 Outbound Blocked:</strong> Direct SMTP mailbox probe is blocked by your ISP or firewall. Email verification will mark SMTP checks as "unknown" without failing.</span>
+            </div>
+          `;
+        }
+
+        if (data.smtpIdentity && data.smtpIdentity.warning) {
+          container.innerHTML += `
+            <div class="banner banner-warning">
+              <span>⚠️ <strong>SMTP Identity Unconfigured:</strong> ${data.smtpIdentity.warning} Set <code>VERIFY_HELO_HOST</code> and <code>VERIFY_MAIL_FROM</code> in <code>.env</code>.</span>
             </div>
           `;
         }
@@ -166,12 +181,14 @@
         const data = await res.json();
 
         // Update KPIs
-        document.getElementById('kpiSent').textContent = data.totals.sent.toLocaleString();
+        document.getElementById('kpiSent').textContent = (data.totals.emailsSent || data.totals.sent).toLocaleString();
         document.getElementById('kpiDelivered').textContent = `${data.totals.delivered.toLocaleString()} delivered`;
-        document.getElementById('kpiOpenRate').textContent = `${data.rates.openRate}%`;
-        document.getElementById('kpiOpens').textContent = data.totals.uniqueOpens.toLocaleString();
-        document.getElementById('kpiRealOpenRate').textContent = `${data.rates.likelyRealOpenRate}%`;
-        document.getElementById('kpiRealOpens').textContent = data.totals.likelyRealOpens.toLocaleString();
+        document.getElementById('kpiOpenRate').textContent = `${(data.rates.openRateAny ?? data.rates.openRate)}%`;
+        document.getElementById('kpiOpens').textContent = (data.totals.openedAny ?? data.totals.uniqueOpens).toLocaleString();
+        const gmailProxyEl = document.getElementById('kpiGmailProxy');
+        if (gmailProxyEl) gmailProxyEl.textContent = (data.totals.gmailProxyOpens || 0).toLocaleString();
+        document.getElementById('kpiRealOpenRate').textContent = `${data.rates.openRate}%`;
+        document.getElementById('kpiRealOpens').textContent = (data.totals.openedHuman ?? data.totals.likelyRealOpens).toLocaleString();
         document.getElementById('kpiClickRate').textContent = `${data.rates.clickRate}%`;
         document.getElementById('kpiClicks').textContent = data.totals.clicked.toLocaleString();
         document.getElementById('kpiReplyRate').textContent = `${data.rates.replyRate}%`;

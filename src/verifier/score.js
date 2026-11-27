@@ -23,16 +23,15 @@ export const VERDICTS = {
 };
 
 /**
- * Calculates score and determines verdict based on pipeline checks
+ * Calculates score and determines verdict based on pipeline checks.
+ * Single source of truth for penalties and scoring.
+ *
  * @param {Array<{name: string, status: string, detail: string, penalty?: number}>} checks 
  * @param {Object} context 
  * @returns {{ score: number, verdict: string, reason: string }}
  */
 export function calculateScoreAndVerdict(checks, context = {}) {
-  // Check for unknown status first (e.g., port 25 blocked or connection failure)
-  const isPort25Blocked = context.port25Blocked || checks.some(c => c.name === 'smtp' && c.status === 'unknown');
-  
-  // Hard failure checks that make an email immediately undeliverable
+  // 1. Hard failure checks that make an email immediately undeliverable (Score: 0)
   const syntaxCheck = checks.find(c => c.name === 'syntax');
   if (syntaxCheck && syntaxCheck.status === 'fail') {
     return {
@@ -69,46 +68,63 @@ export function calculateScoreAndVerdict(checks, context = {}) {
     };
   }
 
-  // If port 25 could not complete probe and no hard failure earlier,
-  // compute a real penalty-based score instead of a flat 50/UNKNOWN.
-  // The in-process caller (index.js) already builds this — but we also
-  // handle the fallthrough case here so calculateVerdict() is consistent.
-  if (isPort25Blocked && (!smtpCheck || smtpCheck.status === 'unknown')) {
-    // Fall through to penalty accumulation below; verdict will be assigned
-    // based on computed score and catchall context.
-  }
+  // 2. Policy / Block signals (5.7.x or blocked probe) -> Verdict UNKNOWN
+  const isProbeBlocked =
+    context.blockedProbe ||
+    (smtpCheck && smtpCheck.status === 'unknown' && /(blocked|blacklist|spamhaus|access denied|banned|reputation|policy)/i.test(smtpCheck.detail || ''));
 
-  // Calculate penalties from secondary risk factors
+  // 3. Calculate penalties from secondary risk factors (deduplicated per check name)
   let totalPenalty = 0;
   const reasons = [];
+  const countedChecks = new Set();
 
   for (const check of checks) {
-    // Count both 'warn' and 'unknown' status checks that carry a penalty
     if ((check.status === 'warn' || check.status === 'unknown') && check.penalty) {
-      totalPenalty += check.penalty;
-      reasons.push(check.detail);
+      if (!countedChecks.has(check.name)) {
+        countedChecks.add(check.name);
+        totalPenalty += check.penalty;
+        reasons.push(check.detail);
+      }
     }
   }
 
   // Provider hiding mailbox status (Outlook, Hotmail, Yahoo, iCloud)
-  if (context.providerHiddenStatus) {
+  // Deduplicate: only add if not already counted via 'provider_policy' check
+  if (context.providerHiddenStatus && !countedChecks.has('provider_policy')) {
+    countedChecks.add('provider_policy');
     totalPenalty += PENALTIES.HIDDEN_MAILBOX_PROVIDER;
     reasons.push('Provider conceals true recipient status (accepts all RCPT commands)');
   }
 
   const score = Math.max(0, Math.min(100, 100 - totalPenalty));
 
-  // Determine verdict based on score and conditions
+  // 4. Determine final verdict
+  if (isProbeBlocked) {
+    return {
+      score,
+      verdict: VERDICTS.UNKNOWN,
+      reason: 'Mail server blocked our probe'
+    };
+  }
+
+  if (context.isGreylisted) {
+    return {
+      score,
+      verdict: VERDICTS.UNKNOWN,
+      reason: reasons.length > 0 ? reasons.join('; ') : 'Server greylisted probe (retrying)'
+    };
+  }
+
+  const isPort25Blocked = context.port25Blocked || (smtpCheck && smtpCheck.status === 'unknown');
+
   let verdict = VERDICTS.DELIVERABLE;
   let finalReason = 'Email is valid and deliverable';
 
-  if (context.providerHiddenStatus || context.isCatchall || context.isGreylisted || score < 80) {
+  if (context.providerHiddenStatus || context.isCatchall || score < 80) {
     verdict = VERDICTS.RISKY;
     finalReason = reasons.length > 0 ? reasons.join('; ') : 'Mailbox marked risky due to provider policies or potential delivery constraints';
   }
 
-  // When SMTP was unknown (port 25 blocked / connection failed) and not risky by other factors,
-  // use UNKNOWN verdict (not DELIVERABLE) since we could not confirm the mailbox exists.
   if (isPort25Blocked && verdict === VERDICTS.DELIVERABLE) {
     verdict = VERDICTS.UNKNOWN;
     finalReason = reasons.length > 0 ? reasons.join('; ') : 'SMTP mailbox existence cannot be confirmed (port 25 blocked)';

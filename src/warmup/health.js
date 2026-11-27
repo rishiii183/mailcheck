@@ -31,11 +31,12 @@ export function getMailboxHealth(mailboxId) {
   }
 
   // 2. Rolling 7-day warmup events received in pool
-  // Status 'inbox', 'spam_rescued', 'bounced'
+  // Status 'inbox', 'spam_rescued', 'bounced' (5.7: only count observed deliveries)
   const events = db.prepare(`
     SELECT status, COUNT(*) as cnt
     FROM warmup_events
     WHERE partner_mailbox_id = ?
+      AND direction = 'received'
       AND created_at >= datetime('now', '-7 days')
     GROUP BY status
   `).all(mailboxId);
@@ -152,5 +153,102 @@ export function getWarmupPlan(mailboxId) {
   return {
     todaySent: todaySentRow ? todaySentRow.cnt : 0,
     history: plans
+  };
+}
+
+/**
+ * 5.7 Rule: Warmup status summary endpoint helper
+ * Returns pool health, today's planned vs sent, last error, next scheduled send
+ */
+export function getWarmupPoolStatus() {
+  const db = getDb();
+  const allMailboxes = db.prepare('SELECT * FROM mailboxes').all();
+  const warmingMailboxes = allMailboxes.filter(m => m.status === 'warming' && !m.error_reason);
+
+  const poolSize = warmingMailboxes.length;
+  const poolOk = poolSize >= 2;
+  const poolMessage = poolOk
+    ? `Warm-up pool active with ${poolSize} mailboxes.`
+    : `Warm-up pool requires at least 2 active mailboxes in 'warming' status (currently: ${poolSize}).`;
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  // Today's planned sends across all warming mailboxes
+  let totalPlanned = 0;
+  for (const mb of warmingMailboxes) {
+    const plan = db.prepare(`
+      SELECT planned_sends FROM warmup_plans WHERE mailbox_id = ? AND target_date = ?
+    `).get(mb.id, todayStr);
+    totalPlanned += plan ? plan.planned_sends : (mb.daily_warmup_target || 40);
+  }
+
+  // Today's sent count
+  const todaySentRow = db.prepare(`
+    SELECT COUNT(*) as cnt FROM warmup_events
+    WHERE direction = 'sent' AND date(created_at) = date('now')
+  `).get();
+  const todaySent = todaySentRow ? todaySentRow.cnt : 0;
+
+  // Next scheduled send
+  const nextSendRow = db.prepare(`
+    SELECT send_at FROM warmup_schedule
+    WHERE status = 'pending' AND datetime(send_at) >= datetime('now')
+    ORDER BY send_at ASC LIMIT 1
+  `).get();
+  const nextScheduledSend = nextSendRow ? nextSendRow.send_at : null;
+
+  // Last error
+  const lastFailedJob = db.prepare(`
+    SELECT last_error FROM warmup_delivery_jobs
+    WHERE status = 'failed' AND last_error IS NOT NULL
+    ORDER BY updated_at DESC LIMIT 1
+  `).get();
+
+  const lastMailboxError = warmingMailboxes.find(m => m.error_reason)?.error_reason || null;
+  const lastError = lastFailedJob ? lastFailedJob.last_error : lastMailboxError;
+
+  // Detailed mailboxes summary
+  const mailboxesSummary = warmingMailboxes.map(mb => {
+    const health = getMailboxHealth(mb.id);
+    const mbPlan = db.prepare(`
+      SELECT planned_sends FROM warmup_plans WHERE mailbox_id = ? AND target_date = ?
+    `).get(mb.id, todayStr);
+    const mbSent = db.prepare(`
+      SELECT COUNT(*) as cnt FROM warmup_events
+      WHERE mailbox_id = ? AND direction = 'sent' AND date(created_at) = date('now')
+    `).get(mb.id)?.cnt || 0;
+    const mbNextSend = db.prepare(`
+      SELECT send_at FROM warmup_schedule
+      WHERE mailbox_id = ? AND status = 'pending'
+      ORDER BY send_at ASC LIMIT 1
+    `).get(mb.id)?.send_at || null;
+
+    return {
+      id: mb.id,
+      email: mb.email,
+      status: mb.status,
+      today_planned: mbPlan ? mbPlan.planned_sends : (mb.daily_warmup_target || 40),
+      today_sent: mbSent,
+      next_send_at: mbNextSend,
+      placement_rate: health.placementRate,
+      reputation_score: health.reputationScore,
+      error_reason: mb.error_reason,
+      health
+    };
+  });
+
+  return {
+    pool: {
+      ok: poolOk,
+      size: poolSize,
+      message: poolMessage
+    },
+    today: {
+      planned: totalPlanned,
+      sent: todaySent
+    },
+    last_error: lastError,
+    next_scheduled_send: nextScheduledSend,
+    mailboxes: mailboxesSummary
   };
 }

@@ -13,14 +13,19 @@ export function initDb(dbPath = config.db.path) {
     dbInstance = null;
   }
 
-  if (dbPath !== ':memory:') {
-    const dir = path.dirname(dbPath);
+  // 6.5 Rule: Make DB_PATH resolve relative to project root
+  const resolvedPath = (dbPath !== ':memory:' && !path.isAbsolute(dbPath))
+    ? path.resolve(config.rootDir, dbPath)
+    : dbPath;
+
+  if (resolvedPath !== ':memory:') {
+    const dir = path.dirname(resolvedPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
   }
 
-  const db = new Database(dbPath);
+  const db = new Database(resolvedPath);
 
   // High performance & concurrency SQLite pragmas
   db.pragma('journal_mode = WAL');
@@ -74,9 +79,13 @@ export function migrate(db) {
       imap_pass_encrypted TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'ready', -- 'warming', 'ready', 'paused', 'error'
       error_reason TEXT,
+      allow_self_signed INTEGER DEFAULT 0,
       daily_warmup_target INTEGER DEFAULT 40,
       warmup_start_date TEXT,
       campaign_daily_cap INTEGER DEFAULT 50,
+      next_send_at DATETIME,
+      dkim_selector TEXT DEFAULT NULL,
+      allow_failed_dns INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -126,6 +135,51 @@ export function migrate(db) {
       status TEXT, -- 'sent', 'inbox', 'spam_rescued', 'read', 'starred', 'replied', 'bounced'
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    -- Warmup Schedule (5.1)
+    CREATE TABLE IF NOT EXISTS warmup_schedule (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mailbox_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      send_at DATETIME NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'claimed', 'sent', 'failed'
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_warmup_sched_status_send ON warmup_schedule(status, send_at);
+    CREATE INDEX IF NOT EXISTS idx_warmup_sched_box_date ON warmup_schedule(mailbox_id, date);
+
+    -- Warmup Delivery Processing Jobs (5.2)
+    CREATE TABLE IF NOT EXISTS warmup_delivery_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      warmup_id TEXT NOT NULL,
+      sender_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+      partner_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+      original_subject TEXT,
+      original_message_id TEXT,
+      attempts INTEGER DEFAULT 0,
+      next_run_at DATETIME NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'completed', 'failed'
+      last_error TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_warmup_delivery_status_next ON warmup_delivery_jobs(status, next_run_at);
+
+    -- Warmup Threaded Reply Jobs (5.3)
+    CREATE TABLE IF NOT EXISTS warmup_reply_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      warmup_id TEXT NOT NULL,
+      from_mailbox_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+      to_mailbox_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+      in_reply_to TEXT NOT NULL,
+      references_header TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      thread_depth INTEGER DEFAULT 1,
+      scheduled_at DATETIME NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'sent', 'failed'
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_warmup_reply_status_sched ON warmup_reply_jobs(status, scheduled_at);
 
     -- Lists of leads
     CREATE TABLE IF NOT EXISTS lists (
@@ -223,7 +277,7 @@ export function migrate(db) {
       lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
       sequence_step_id INTEGER NOT NULL REFERENCES sequence_steps(id) ON DELETE CASCADE,
       variant_id INTEGER REFERENCES step_variants(id),
-      mailbox_id INTEGER REFERENCES mailboxes(id),
+      mailbox_id INTEGER REFERENCES mailboxes(id) ON DELETE SET NULL,
       status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'claimed', 'sent', 'retrying', 'skipped', 'failed'
       scheduled_at DATETIME NOT NULL,
       sent_at DATETIME,
@@ -280,6 +334,29 @@ export function migrate(db) {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- Mailbox IMAP sync tracking
+    CREATE TABLE IF NOT EXISTS mailbox_sync (
+      mailbox_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+      folder TEXT NOT NULL DEFAULT 'INBOX',
+      last_uid INTEGER NOT NULL DEFAULT 0,
+      uidvalidity TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (mailbox_id, folder)
+    );
+
+    -- Verification Greylist Retries (4.8)
+    CREATE TABLE IF NOT EXISTS verification_retries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL UNIQUE,
+      attempt INTEGER DEFAULT 1,
+      next_retry_at DATETIME NOT NULL,
+      status TEXT DEFAULT 'pending', -- 'pending', 'completed', 'failed'
+      last_error TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_verification_retries_status ON verification_retries(status, next_retry_at);
+
     -- Performance & safety indexes
     CREATE INDEX IF NOT EXISTS idx_lead_steps_status_sched ON lead_steps(status, scheduled_at);
     CREATE INDEX IF NOT EXISTS idx_email_events_lead_step_type ON email_events(lead_step_id, type);
@@ -287,6 +364,39 @@ export function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_warmup_events_warmup_id ON warmup_events(warmup_id);
     CREATE INDEX IF NOT EXISTS idx_warmup_events_mailbox ON warmup_events(mailbox_id, created_at);
   `);
+
+  // Migration for mailboxes table columns
+  try {
+    db.exec('ALTER TABLE mailboxes ADD COLUMN allow_self_signed INTEGER DEFAULT 0');
+  } catch (err) {}
+  try {
+    db.exec('ALTER TABLE mailboxes ADD COLUMN next_send_at DATETIME');
+  } catch (err) {}
+  try {
+    db.exec('ALTER TABLE mailboxes ADD COLUMN dkim_selector TEXT');
+  } catch (err) {}
+  try {
+    db.exec('ALTER TABLE mailboxes ADD COLUMN allow_failed_dns INTEGER DEFAULT 0');
+  } catch (err) {}
+
+  // 6.8 Cleanup: remove any test fixture rows left in the real database
+  try {
+    db.prepare('DELETE FROM lead_steps WHERE id = 999').run();
+  } catch (err) {}
+  try {
+    db.prepare('DELETE FROM suppression WHERE email = ?').run('audit_test@example.com');
+  } catch (err) {}
+
+  // Migration for duplicate leads removal and unique index on (list_id, email)
+  try {
+    db.exec(`
+      DELETE FROM leads
+      WHERE id NOT IN (
+        SELECT MIN(id) FROM leads GROUP BY list_id, email
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_list_email ON leads(list_id, email);
+    `);
+  } catch (err) {}
 
   // Initialize default settings if not existing
   const initSetting = db.prepare(`

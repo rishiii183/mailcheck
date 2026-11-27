@@ -241,10 +241,11 @@ PUBLIC_PORT=3001
 # Public URL exposed via Tunnel/ngrok (Used for tracking & unsubscribe links)
 PUBLIC_BASE_URL=https://track.yourdomain.com
 
-# 32-byte hexadecimal encryption key for AES-256-GCM mailbox credentials
+# 32-byte hexadecimal encryption key for AES-256-GCM mailbox credentials (64 hex characters)
+# Generate one with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
-# Optional Admin API Key protection (leave blank for open local access)
+# Mandatory Admin API Key protection (leave blank to auto-generate into data/.admin_key)
 API_KEY=
 
 # Database file location

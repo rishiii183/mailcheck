@@ -15,6 +15,15 @@ let isProcessingTick = false;
 const mailboxLastSendMap = new Map();
 
 /**
+ * Calculate random send gap between min and max seconds
+ */
+export function calculateRandomSendGap(minSeconds, maxSeconds) {
+  const min = Math.max(1, parseInt(minSeconds, 10) || 90);
+  const max = Math.max(min, parseInt(maxSeconds, 10) || 240);
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+/**
  * Perform a single execution tick of the campaign sending scheduler
  * @param {Object} [options] Options for testing (e.g. mockSend, ignoreSchedule, ignoreGaps)
  */
@@ -35,6 +44,24 @@ export async function runSchedulerTick(options = {}) {
   try {
     const db = getDb();
     const postalAddress = getSetting('postal_address') || '';
+
+    // 2.8 Sweeper: any lead_step in 'claimed' for > 10 min
+    // without message_id -> release to pending; with message_id -> mark sent
+    db.prepare(`
+      UPDATE lead_steps
+      SET status = 'pending', mailbox_id = NULL, last_error = 'Swept: claimed > 10m without message_id'
+      WHERE status = 'claimed'
+        AND scheduled_at <= datetime('now', '-10 minutes')
+        AND (message_id IS NULL OR message_id = '')
+    `).run();
+
+    db.prepare(`
+      UPDATE lead_steps
+      SET status = 'sent', sent_at = CURRENT_TIMESTAMP, last_error = 'Swept: claimed > 10m with message_id'
+      WHERE status = 'claimed'
+        AND scheduled_at <= datetime('now', '-10 minutes')
+        AND message_id IS NOT NULL AND message_id != ''
+    `).run();
 
     // Fetch active running campaigns
     const runningCampaigns = db.prepare("SELECT * FROM campaigns WHERE status = 'running'").all();
@@ -129,10 +156,18 @@ export async function runSchedulerTick(options = {}) {
 
         // Enforce gap between sends for this mailbox
         const nowMs = Date.now();
-        const lastSend = mailboxLastSendMap.get(selectedMailbox.id) || 0;
-        const minGapMs = (campaign.min_gap_seconds || 90) * 1000;
-        if (!options.ignoreGaps && (nowMs - lastSend < minGapMs)) {
-          continue;
+        if (!options.ignoreGaps) {
+          if (selectedMailbox.next_send_at) {
+            const nextSendTime = new Date(selectedMailbox.next_send_at).getTime();
+            if (nowMs < nextSendTime) {
+              continue;
+            }
+          }
+          const lastSend = mailboxLastSendMap.get(selectedMailbox.id) || 0;
+          const minGapMs = (campaign.min_gap_seconds || 90) * 1000;
+          if (nowMs - lastSend < minGapMs) {
+            continue;
+          }
         }
 
         // 4. ATOMIC CLAIM: DB Transaction guarantees step cannot be double-sent
@@ -160,18 +195,39 @@ export async function runSchedulerTick(options = {}) {
             options
           });
 
+          // 2.9 Random send gap persisted in DB
+          const gapSec = calculateRandomSendGap(campaign.min_gap_seconds, campaign.max_gap_seconds);
+          const nextSendIso = new Date(Date.now() + gapSec * 1000).toISOString();
+          db.prepare('UPDATE mailboxes SET next_send_at = ? WHERE id = ?').run(nextSendIso, selectedMailbox.id);
+          selectedMailbox.next_send_at = nextSendIso;
           mailboxLastSendMap.set(selectedMailbox.id, Date.now());
           results.sent++;
         } catch (err) {
-          handleSendFailure(step.id, step.lead_email, step.retry_count || 0, err);
-          if (/5\d{2}|invalid|user unknown|mailbox not found|address rejected/i.test(err.message)) {
+          handleSendFailure(step.id, step.lead_email, step.retry_count || 0, err, selectedMailbox.id);
+          const errorClass = classifySendError(err);
+          if (errorClass === 'hard') {
             results.failed++;
+          } else if (errorClass === 'auth') {
+            // Mailbox marked as error, step pending
           } else {
             results.retried++;
           }
         }
       }
     }
+
+    // 2.8 Campaign completion: after each tick, mark a running campaign 'completed'
+    // when no lead_steps remain in pending, retrying or claimed
+    db.prepare(`
+      UPDATE campaigns
+      SET status = 'completed', updated_at = CURRENT_TIMESTAMP
+      WHERE status = 'running'
+        AND NOT EXISTS (
+          SELECT 1 FROM lead_steps
+          WHERE lead_steps.campaign_id = campaigns.id
+            AND lead_steps.status IN ('pending', 'retrying', 'claimed')
+        )
+    `).run();
   } catch (err) {
     console.error('Campaign scheduler error:', err);
   } finally {
@@ -258,7 +314,7 @@ async function executeSendStep({ step, mailbox, campaign, postalAddress, options
         user: mailbox.smtp_user,
         pass: mailbox.smtp_pass
       },
-      tls: { rejectUnauthorized: false }
+      tls: mailbox.allow_self_signed ? { rejectUnauthorized: false } : undefined
     });
 
     sentResult = await sendQueue.enqueue(mailbox.smtp_host, () => transporter.sendMail(mailOptions));
@@ -289,15 +345,100 @@ async function executeSendStep({ step, mailbox, campaign, postalAddress, options
 }
 
 /**
+ * Classify SMTP sending errors into 'hard', 'auth', or 'network'/'soft'
+ * @param {Error|Object} err
+ * @returns {'hard' | 'auth' | 'network' | 'soft'}
+ */
+export function classifySendError(err) {
+  if (!err) return 'soft';
+
+  const code = (err.code || '').toUpperCase();
+  const responseCode = Number(err.responseCode) || (err.response ? parseInt(String(err.response).slice(0, 3), 10) : 0);
+  const command = (err.command || '').toUpperCase();
+  const message = (err.message || '').toLowerCase();
+  const responseStr = String(err.response || '').toLowerCase();
+
+  // 1. AUTH or CONFIG failures
+  // EAUTH, responseCode 535/534/530, TLS errors: do NOT touch lead
+  if (
+    code === 'EAUTH' ||
+    responseCode === 535 ||
+    responseCode === 534 ||
+    responseCode === 530 ||
+    code === 'ETLS' ||
+    code === 'CERT_HAS_EXPIRED' ||
+    code === 'DEPTH_ZERO_SELF_SIGNED_CERT' ||
+    command === 'STARTTLS' ||
+    command.startsWith('AUTH') ||
+    message.includes('authentication') ||
+    message.includes('bad credentials') ||
+    message.includes('self-signed') ||
+    message.includes('certificate') ||
+    message.includes('handshake')
+  ) {
+    return 'auth';
+  }
+
+  // 2. HARD failure
+  // ONLY when the failure is at the recipient stage (err.command is 'RCPT TO' or response is 550, 551, 553 or 554 about recipient)
+  // and responseCode is 550-554
+  const is55x = (responseCode >= 550 && responseCode <= 554) || (/55[0-4]/.test(responseStr));
+  const isRcptStage = command === 'RCPT TO' || command === 'RCPT';
+  const isRecipientText = /recipient|user unknown|mailbox not found|address rejected|user not found|does not exist|invalid address|no such user/i.test(message + ' ' + responseStr);
+
+  if (is55x && (isRcptStage || isRecipientText)) {
+    return 'hard';
+  }
+
+  if (isRcptStage && /55[0-4]/.test(message)) {
+    return 'hard';
+  }
+
+  // 3. NETWORK failures and 4xx (soft retry)
+  if (
+    code === 'ECONNECTION' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ESOCKET' ||
+    code === 'ENOTFOUND' ||
+    code === 'EAI_AGAIN' ||
+    code === 'ECONNRESET' ||
+    code === 'EPIPE' ||
+    code === 'ECONNREFUSED' ||
+    (responseCode >= 400 && responseCode < 500) ||
+    /timeout|connect|socket|dns|network/i.test(message)
+  ) {
+    return 'network';
+  }
+
+  return 'soft';
+}
+
+/**
  * Handle failure when sending an email
  */
-function handleSendFailure(stepId, email, retryCount, err) {
+export function handleSendFailure(stepId, email, retryCount, err, mailboxId) {
   const db = getDb();
   const errorMsg = err.message || 'SMTP Send Failed';
-  const isHardFail = /5\d{2}|invalid recipient|user unknown|mailbox not found|address rejected/i.test(errorMsg);
+  const classification = classifySendError(err);
 
-  if (isHardFail) {
-    // Hard bounce -> mark failed, suppress email
+  if (classification === 'auth') {
+    // Auth or config failure: do NOT touch lead. Release step back to 'pending',
+    // mark mailbox status 'error' with error_reason, and stop sending from it.
+    db.prepare(`
+      UPDATE lead_steps
+      SET status = 'pending', mailbox_id = NULL, last_error = ?
+      WHERE id = ?
+    `).run(errorMsg, stepId);
+
+    if (mailboxId) {
+      db.prepare(`
+        UPDATE mailboxes
+        SET status = 'error', error_reason = ?
+        WHERE id = ?
+      `).run(errorMsg, mailboxId);
+    }
+  } else if (classification === 'hard') {
+    // Hard bounce -> mark failed, record bounce_hard, suppress email
     db.prepare(`
       UPDATE lead_steps
       SET status = 'failed', last_error = ?
@@ -310,8 +451,10 @@ function handleSendFailure(stepId, email, retryCount, err) {
     `).run(stepId, JSON.stringify({ error: errorMsg }));
 
     addSuppression(email, 'hard_bounce');
+
+    db.prepare("UPDATE leads SET status = 'bounced' WHERE email = ?").run(email);
   } else {
-    // Soft failure -> retry up to 3 times
+    // Soft failure / Network / 4xx -> retry with backoff up to 3 times, lead untouched
     const nextRetry = (retryCount || 0) + 1;
     if (nextRetry < 3) {
       db.prepare(`
@@ -337,7 +480,7 @@ function handleSendFailure(stepId, email, retryCount, err) {
 /**
  * Schedule next step in the campaign sequence
  */
-function scheduleNextStep(currentStep, campaign) {
+export function scheduleNextStep(currentStep, campaign) {
   const db = getDb();
   const nextStep = db.prepare(`
     SELECT * FROM sequence_steps
@@ -362,15 +505,16 @@ function scheduleNextStep(currentStep, campaign) {
   if (variants.length === 0) return;
 
   const chosenVariant = variants[Math.floor(Math.random() * variants.length)];
-  const delayDays = nextStep.delay_days || 1;
+  const delayDays = nextStep.delay_days ?? 1;
+  const baseTime = currentStep.sent_at || new Date().toISOString();
 
   db.prepare(`
     INSERT OR IGNORE INTO lead_steps (
       campaign_id, lead_id, sequence_step_id, variant_id, status, scheduled_at
     ) VALUES (
-      ?, ?, ?, ?, 'pending', datetime('now', '+' || ? || ' days')
+      ?, ?, ?, ?, 'pending', datetime(?, '+' || ? || ' days')
     )
-  `).run(campaign.id, currentStep.lead_id, nextStep.id, chosenVariant.id, delayDays);
+  `).run(campaign.id, currentStep.lead_id, nextStep.id, chosenVariant.id, baseTime, delayDays);
 }
 
 /**

@@ -3,9 +3,9 @@ import { simpleParser } from 'mailparser';
 import { getDb } from '../db.js';
 import { getMailboxById, listMailboxes } from '../mailboxes/accounts.js';
 import { isBounceMessage, parseBounce, processBounce } from './bounces.js';
+import { addSuppression } from './suppression.js';
 
 let pollerInterval = null;
-const activeClients = new Map();
 
 /**
  * Detect whether an incoming email is an automated auto-reply or Out of Office notification
@@ -71,10 +71,11 @@ export function isAutoReply(headers = {}, subject = '', bodyText = '') {
 export function processIncomingEmail(parsed, mailboxId) {
   const db = getDb();
 
-  // Check if it's a bounce first
+  // Check if it's a bounce first (c)
   if (isBounceMessage(parsed)) {
     const bounceInfo = parseBounce(parsed);
-    return processBounce(bounceInfo);
+    const bounceResult = processBounce(bounceInfo);
+    return { isBounce: true, matched: true, ...bounceResult };
   }
 
   const fromEmail = (parsed.from?.value?.[0]?.address || parsed.from?.text || '').toLowerCase().trim();
@@ -82,7 +83,23 @@ export function processIncomingEmail(parsed, mailboxId) {
   const bodyText = parsed.text || '';
   const snippet = bodyText.replace(/\s+/g, ' ').trim().slice(0, 160);
 
-  // Match reply by In-Reply-To or References
+  // 6.4 Unsubscribe-by-email:
+  // When an incoming message goes to the List-Unsubscribe mailto address with subject containing "unsubscribe", add sender to suppression list
+  const isUnsubscribeSubject = subject && /unsubscribe/i.test(subject);
+  if (isUnsubscribeSubject && fromEmail) {
+    addSuppression(fromEmail, 'email_unsubscribe');
+    let leadRow = db.prepare('SELECT id FROM leads WHERE email = ?').get(fromEmail);
+    if (leadRow) {
+      db.prepare("UPDATE leads SET status = 'unsubscribed' WHERE id = ?").run(leadRow.id);
+      const stepRow = db.prepare('SELECT id FROM lead_steps WHERE lead_id = ? ORDER BY id DESC LIMIT 1').get(leadRow.id);
+      if (stepRow) {
+        db.prepare("INSERT INTO email_events (type, lead_step_id, meta_json) VALUES ('unsubscribe', ?, ?)").run(stepRow.id, JSON.stringify({ source: 'email' }));
+      }
+    }
+    return { isUnsubscribe: true, matched: true, suppressed: fromEmail };
+  }
+
+  // Match reply by In-Reply-To or References (a)
   const inReplyTo = parsed.inReplyTo || null;
   const references = parsed.references
     ? (Array.isArray(parsed.references) ? parsed.references : [parsed.references])
@@ -102,17 +119,23 @@ export function processIncomingEmail(parsed, mailboxId) {
     }
   }
 
-  // 2. Fallback: match by sender email in active leads
+  // 2. Fallback match (b): sender email has a sent step in the last 60 days
   if (!matchedStep && fromEmail) {
     matchedStep = db.prepare(`
       SELECT ls.* FROM lead_steps ls
       JOIN leads l ON l.id = ls.lead_id
       WHERE l.email = ? AND ls.status = 'sent'
+        AND ls.sent_at >= datetime('now', '-60 days')
       ORDER BY ls.sent_at DESC LIMIT 1
     `).get(fromEmail);
   }
 
-  const leadId = matchedStep ? matchedStep.lead_id : null;
+  // Drop everything else - do not store in replies table
+  if (!matchedStep) {
+    return { matched: false, dropped: true };
+  }
+
+  const leadId = matchedStep.lead_id;
   const autoReply = isAutoReply(parsed.headers || {}, subject, bodyText);
 
   // Validate mailboxId if provided
@@ -129,7 +152,7 @@ export function processIncomingEmail(parsed, mailboxId) {
       subject, snippet, body_text, is_auto_reply, label, handled, received_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'neutral', 0, CURRENT_TIMESTAMP)
   `).run(
-    matchedStep ? matchedStep.id : null,
+    matchedStep.id,
     validMailboxId,
     leadId,
     fromEmail,
@@ -160,18 +183,21 @@ export function processIncomingEmail(parsed, mailboxId) {
   return {
     replyId,
     isAutoReply: autoReply,
-    matched: Boolean(matchedStep),
-    leadStepId: matchedStep ? matchedStep.id : null
+    matched: true,
+    leadStepId: matchedStep.id
   };
 }
 
 /**
- * Poll IMAP for a single mailbox using imapflow
+ * Poll IMAP for a single mailbox using imapflow or an injected client
+ * @param {Object} mailbox
+ * @param {Object} [options]
  */
-export async function pollMailboxReplies(mailbox) {
+export async function pollMailboxReplies(mailbox, options = {}) {
   if (!mailbox || !mailbox.imap_host || !mailbox.imap_user) return;
 
-  const client = new ImapFlow({
+  const clientFactory = options.clientFactory || ((cfg) => new ImapFlow(cfg));
+  const client = clientFactory({
     host: mailbox.imap_host,
     port: mailbox.imap_port,
     secure: Boolean(mailbox.imap_secure),
@@ -180,30 +206,97 @@ export async function pollMailboxReplies(mailbox) {
       pass: mailbox.imap_pass
     },
     logger: false,
-    tls: { rejectUnauthorized: false }
+    tls: mailbox.allow_self_signed ? { rejectUnauthorized: false } : undefined
   });
 
+  const folder = 'INBOX';
   try {
     await client.connect();
-    const lock = await client.getMailboxLock('INBOX');
+    const lock = await client.getMailboxLock(folder);
 
     try {
-      // Fetch unseen messages or recent messages from the past 2 days
-      const searchCriteria = { seen: false };
-      const messages = client.fetch(searchCriteria, { source: true, uid: true });
+      const db = getDb();
+      let syncRow = db.prepare('SELECT * FROM mailbox_sync WHERE mailbox_id = ? AND folder = ?').get(mailbox.id, folder);
+      let lastUid = syncRow ? (syncRow.last_uid || 0) : 0;
+      const currentUidValidity = String(client.mailbox?.uidValidity || '');
 
-      for await (const msg of messages) {
-        try {
-          const parsed = await simpleParser(msg.source);
-          processIncomingEmail(parsed, mailbox.id);
-          // Mark as seen
-          await client.messageFlagsAdd({ uid: msg.uid }, ['\\Seen']);
-        } catch (err) {
-          console.error(`Error parsing incoming email for mailbox ${mailbox.id}:`, err.message);
+      // Reset last_uid if UIDVALIDITY changed
+      if (syncRow && syncRow.uidvalidity && syncRow.uidvalidity !== currentUidValidity) {
+        lastUid = 0;
+      }
+
+      // Fetch only UIDs greater than last_uid
+      const searchRange = lastUid > 0 ? `${lastUid + 1}:*` : '1:*';
+      const fetchedMessages = [];
+
+      // ImapFlow Architecture Note:
+      // We collect all candidate messages into an array first and complete the fetch stream
+      // before processing message contents or issuing messageFlagsAdd. Calling IMAP commands
+      // while an active fetch generator stream is open causes re-entrant command deadlocks,
+      // socket stream contention, and parser crashes in ImapFlow.
+      try {
+        const stream = client.fetch(searchRange, { source: true, uid: true, headers: true }, { uid: true });
+        for await (const msg of stream) {
+          if (msg.uid > lastUid) {
+            fetchedMessages.push({
+              uid: msg.uid,
+              source: msg.source,
+              headers: msg.headers
+            });
+          }
+        }
+      } catch (fetchErr) {
+        // Mailbox empty or range invalid on some servers
+      }
+
+      fetchedMessages.sort((a, b) => a.uid - b.uid);
+
+      let maxProcessedUid = lastUid;
+      const uidsToFlagSeen = [];
+
+      for (const msg of fetchedMessages) {
+        if (msg.uid > maxProcessedUid) {
+          maxProcessedUid = msg.uid;
+        }
+
+        const parsed = await simpleParser(msg.source);
+
+        // Ignore messages with X-MailCheck-Warmup header (belong to warm-up module)
+        const hasWarmupHeader = parsed.headers?.has('x-mailcheck-warmup') ||
+                                Boolean(parsed.headers?.get('x-mailcheck-warmup')) ||
+                                /x-mailcheck-warmup/i.test(msg.source?.toString('utf8')?.slice(0, 2000) || '');
+
+        if (hasWarmupHeader) {
+          continue;
+        }
+
+        const result = processIncomingEmail(parsed, mailbox.id);
+        if (result && (result.matched || result.isBounce || result.isUnsubscribe)) {
+          uidsToFlagSeen.push(msg.uid);
         }
       }
+
+      // Never touch flags on anything that is not a matched reply or a bounce
+      if (uidsToFlagSeen.length > 0 && typeof client.messageFlagsAdd === 'function') {
+        for (const uid of uidsToFlagSeen) {
+          await client.messageFlagsAdd({ uid }, ['\\Seen']);
+        }
+      }
+
+      // Update mailbox_sync tracking
+      db.prepare(`
+        INSERT INTO mailbox_sync (mailbox_id, folder, last_uid, uidvalidity, updated_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(mailbox_id, folder) DO UPDATE SET
+          last_uid = excluded.last_uid,
+          uidvalidity = excluded.uidvalidity,
+          updated_at = CURRENT_TIMESTAMP
+      `).run(mailbox.id, folder, maxProcessedUid, currentUidValidity);
+
     } finally {
-      lock.release();
+      if (lock && typeof lock.release === 'function') {
+        lock.release();
+      }
     }
 
     await client.logout();
@@ -277,7 +370,7 @@ export function listReplies({ label, handled, isAutoReply, limit = 50, offset = 
 /**
  * Start the global IMAP poller loop (every 2 minutes)
  */
-export function startReplyPoller(intervalMs = 120000) {
+export function startReplyPoller(intervalMs = 120000, options = {}) {
   if (pollerInterval) return;
 
   const pollAll = async () => {
@@ -286,7 +379,7 @@ export function startReplyPoller(intervalMs = 120000) {
       for (const mb of mailboxes) {
         const fullMb = getMailboxById(mb.id, true);
         if (fullMb && fullMb.status !== 'error') {
-          await pollMailboxReplies(fullMb);
+          await pollMailboxReplies(fullMb, options);
         }
       }
     } catch (err) {

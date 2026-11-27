@@ -6,16 +6,19 @@ import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import { getDb, getSetting, setSetting, getAllSettings } from './db.js';
 import { verifyEmail, verifyBulk, VERDICTS } from './verifier/index.js';
-import { getPort25Status } from './verifier/smtp.js';
+import { getPort25Status, detectPort25Availability } from './verifier/smtp.js';
+import { runGreylistRetryTick } from './verifier/retries.js';
 import { createMailbox, getMailboxById, listMailboxes, updateMailbox, deleteMailbox, testMailboxConnection } from './mailboxes/accounts.js';
 import { checkMailboxDns } from './mailboxes/dns-check.js';
-import { getMailboxHealth, getWarmupPlan } from './warmup/health.js';
-import { createCampaign, getCampaign, listCampaigns, updateCampaign, launchCampaign, pauseCampaign, resumeCampaign, duplicateCampaign, deleteCampaign, previewStep } from './campaigns/sequence.js';
+import { getMailboxHealth, getWarmupPlan, getWarmupPoolStatus } from './warmup/health.js';
+import { createCampaign, getCampaign, listCampaigns, updateCampaign, launchCampaign, getLaunchStatus, pauseCampaign, resumeCampaign, duplicateCampaign, deleteCampaign, previewStep } from './campaigns/sequence.js';
 import { getOverviewStats, getCampaignStats, getCampaignLeads, getLeadTimeline } from './stats/queries.js';
 import { listReplies, labelReply, markReplyHandled } from './campaigns/replies.js';
 import { listSuppression, addSuppression, removeSuppression, importSuppression } from './campaigns/suppression.js';
 import { startEngine, stopEngine, runSchedulerTick } from './campaigns/engine.js';
 import { startReplyPoller, stopReplyPoller } from './campaigns/replies.js';
+import { startWarmupRunner, stopWarmupRunner } from './warmup/runner.js';
+import { importLeads, parseCsv } from './campaigns/leads.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,13 +38,38 @@ export function createAdminServer(options = {}) {
     prefix: '/'
   });
 
-  // Optional API Key Authentication Hook
-  fastify.addHook('preHandler', async (request, reply) => {
-    // Only check /api/* routes
-    if (!request.url.startsWith('/api/')) return;
+  // Global Error Handler - returns JSON { error }
+  fastify.setErrorHandler((error, request, reply) => {
+    const statusCode = error.statusCode || 500;
+    const message = error.message || 'Internal Server Error';
+    return reply.status(statusCode).send({ error: message });
+  });
 
-    const apiKey = config.admin.apiKey;
-    if (apiKey && apiKey.trim()) {
+  // 1.5 Security: Host check (DNS rebinding), Origin check (CSRF), Mandatory API_KEY
+  fastify.addHook('preHandler', async (request, reply) => {
+    // 1. Host header validation
+    const rawHost = request.headers.host || '';
+    const host = rawHost.split(':')[0].toLowerCase();
+    const allowedHosts = ['localhost', '127.0.0.1', '::1', '[::1]'];
+    if (!host || !allowedHosts.includes(host)) {
+      return reply.status(403).send({ error: 'Forbidden: Invalid Host header' });
+    }
+
+    // 2. CSRF defense: verify Origin for non-GET requests if present
+    if (request.method !== 'GET' && request.headers.origin) {
+      try {
+        const originUrl = new URL(request.headers.origin);
+        if (!allowedHosts.includes(originUrl.hostname.toLowerCase())) {
+          return reply.status(403).send({ error: 'Forbidden: Cross-origin request blocked' });
+        }
+      } catch {
+        return reply.status(403).send({ error: 'Forbidden: Invalid Origin header' });
+      }
+    }
+
+    // 3. Mandatory API_KEY authentication for all /api/* routes
+    if (request.url.startsWith('/api/')) {
+      const apiKey = config.admin.apiKey;
       const authHeader = request.headers.authorization;
       const xApiKey = request.headers['x-api-key'];
       const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : xApiKey;
@@ -65,9 +93,23 @@ export function createAdminServer(options = {}) {
 
     return reply.send({
       port25: {
+        checked: port25.checked,
         available: port25.available,
         checkedAt: port25.checkedAt,
-        message: port25.available ? 'Outbound port 25 is open' : 'Outbound port 25 appears blocked by ISP/firewall. Verification will mark SMTP checks as unknown.'
+        error: port25.error,
+        message: !port25.checked
+          ? 'Checking outbound port 25 availability...'
+          : port25.available
+            ? 'Outbound port 25 is open'
+            : `Outbound port 25 appears blocked by ISP/firewall (${port25.error || 'connection failed'}). Verification will mark SMTP checks as unknown.`
+      },
+      smtpIdentity: {
+        heloHost: config.verifier.heloHost,
+        mailFrom: config.verifier.mailFrom,
+        isConfigured: config.verifier.identityConfigured,
+        warning: config.verifier.identityConfigured
+          ? null
+          : 'VERIFY_HELO_HOST or VERIFY_MAIL_FROM is unset in .env. Accuracy will be reduced.'
       },
       publicServer: {
         baseUrl: publicBaseUrl,
@@ -96,12 +138,28 @@ export function createAdminServer(options = {}) {
   // ==========================================
   // MODULE 1: EMAIL VERIFIER APIS
   // ==========================================
-  fastify.post('/api/verify', async (request, reply) => {
+  fastify.post('/api/verify', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['email'],
+        properties: {
+          email: { type: 'string', minLength: 3 }
+        }
+      }
+    }
+  }, async (request, reply) => {
     const { email } = request.body || {};
     if (!email) return reply.status(400).send({ error: 'Email is required' });
 
     const result = await verifyEmail(email);
     return reply.send(result);
+  });
+
+  fastify.get('/api/verify/retries', async (request, reply) => {
+    const db = getDb();
+    const rows = db.prepare('SELECT * FROM verification_retries ORDER BY id DESC LIMIT 50').all();
+    return reply.send(rows);
   });
 
   // SSE Bulk verification stream
@@ -131,7 +189,7 @@ export function createAdminServer(options = {}) {
     if (listId) {
       const db = getDb();
       for (const res of results.results) {
-        db.prepare('INSERT OR IGNORE INTO leads (list_id, email, status) VALUES (?, ?, "active")').run(listId, res.email);
+        db.prepare("INSERT OR IGNORE INTO leads (list_id, email, status) VALUES (?, ?, 'active')").run(listId, res.email);
       }
     }
 
@@ -172,6 +230,48 @@ export function createAdminServer(options = {}) {
     return reply.send(leads);
   });
 
+  fastify.post('/api/lists/:id/leads/import', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      let rows = [];
+      if (request.isMultipart()) {
+        const file = await request.file();
+        if (!file) {
+          return reply.status(400).send({ error: 'No file uploaded' });
+        }
+        const buf = await file.toBuffer();
+        rows = parseCsv(buf.toString('utf-8'));
+      } else if (request.body) {
+        if (Array.isArray(request.body.rows)) {
+          rows = request.body.rows;
+        } else if (typeof request.body.csv === 'string') {
+          rows = parseCsv(request.body.csv);
+        } else if (typeof request.body === 'string') {
+          rows = parseCsv(request.body);
+        } else {
+          return reply.status(400).send({ error: 'Invalid body: expected rows array or csv string' });
+        }
+      } else {
+        return reply.status(400).send({ error: 'Body or multipart file required' });
+      }
+
+      const result = importLeads(Number(request.params.id), rows);
+      return reply.send({ success: true, ...result });
+    } catch (err) {
+      const status = err.message && err.message.includes('not found') ? 404 : 400;
+      return reply.status(status).send({ error: err.message });
+    }
+  });
+
   fastify.delete('/api/lists/:id', async (request, reply) => {
     const db = getDb();
     db.prepare('DELETE FROM lists WHERE id = ?').run(request.params.id);
@@ -203,9 +303,43 @@ export function createAdminServer(options = {}) {
     return reply.send(listMailboxes());
   });
 
-  fastify.post('/api/mailboxes', async (request, reply) => {
+  // 6.3 Mailbox creation with connection testing and status validation
+  fastify.post('/api/mailboxes', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['email', 'smtp_host', 'smtp_user', 'smtp_pass', 'imap_host', 'imap_user', 'imap_pass'],
+        properties: {
+          email: { type: 'string' },
+          display_name: { type: 'string' },
+          smtp_host: { type: 'string' },
+          smtp_port: { type: 'number' },
+          smtp_secure: { type: 'boolean' },
+          smtp_user: { type: 'string' },
+          smtp_pass: { type: 'string' },
+          imap_host: { type: 'string' },
+          imap_port: { type: 'number' },
+          imap_secure: { type: 'boolean' },
+          imap_user: { type: 'string' },
+          imap_pass: { type: 'string' },
+          status: { type: 'string', enum: ['ready', 'warming', 'paused'] },
+          dkim_selector: { type: ['string', 'null'] },
+          allow_failed_dns: { type: 'number' },
+          allow_self_signed: { type: 'number' },
+          daily_warmup_target: { type: 'number' },
+          campaign_daily_cap: { type: 'number' }
+        }
+      }
+    }
+  }, async (request, reply) => {
     try {
-      const mb = await createMailbox(request.body);
+      const { status } = request.body;
+      if (status && !['ready', 'warming', 'paused'].includes(status)) {
+        return reply.status(400).send({ error: `Invalid status: '${status}'. Must be 'ready', 'warming', or 'paused'` });
+      }
+      // 6.3: Run connection test before saving unless skipTest=true explicitly passed
+      const testFirst = request.query?.skipTest === 'true' ? false : true;
+      const mb = await createMailbox(request.body, { testFirst });
       return reply.send(mb);
     } catch (err) {
       return reply.status(400).send({ error: err.message });
@@ -255,14 +389,80 @@ export function createAdminServer(options = {}) {
     return reply.send({ health, plan, mailbox: mb });
   });
 
-  fastify.post('/api/mailboxes/:id/warmup/:action', async (request, reply) => {
-    const { id, action } = request.params;
-    let newStatus = 'warming';
-    if (action === 'pause') newStatus = 'paused';
-    if (action === 'resume' || action === 'start') newStatus = 'warming';
+  // 6.3 Validate warmup action: accept only start, pause, resume
+  fastify.post('/api/mailboxes/:id/warmup/:action', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id', 'action'],
+        properties: {
+          id: { type: 'string' },
+          action: { type: 'string', enum: ['start', 'pause', 'resume'] }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const { id, action } = request.params;
+      if (!['start', 'pause', 'resume'].includes(action)) {
+        return reply.status(400).send({ error: "Invalid action. Must be 'start', 'pause', or 'resume'" });
+      }
 
-    const updated = updateMailbox(id, { status: newStatus });
-    return reply.send(updated);
+      const mb = getMailboxById(id);
+      if (!mb) {
+        return reply.status(404).send({ error: 'Mailbox not found' });
+      }
+
+      let newStatus = 'warming';
+      if (action === 'pause') newStatus = 'paused';
+      if (action === 'resume' || action === 'start') newStatus = 'warming';
+
+      const updated = updateMailbox(id, { status: newStatus });
+      return reply.send(updated);
+    } catch (err) {
+      return reply.status(400).send({ error: err.message });
+    }
+  });
+
+  // 5.7 Warmup pool & delivery status summary
+  fastify.get('/api/warmup/status', {
+    schema: {
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            pool: {
+              type: 'object',
+              properties: {
+                ok: { type: 'boolean' },
+                size: { type: 'number' },
+                message: { type: 'string' }
+              }
+            },
+            today: {
+              type: 'object',
+              properties: {
+                planned: { type: 'number' },
+                sent: { type: 'number' }
+              }
+            },
+            last_error: { type: ['string', 'null'] },
+            next_scheduled_send: { type: ['string', 'null'] },
+            mailboxes: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true }
+            }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const status = getWarmupPoolStatus();
+      return reply.send(status);
+    } catch (err) {
+      return reply.status(500).send({ error: err.message });
+    }
   });
 
   // ==========================================
@@ -301,12 +501,45 @@ export function createAdminServer(options = {}) {
     return reply.send({ success: true });
   });
 
-  fastify.post('/api/campaigns/:id/launch', async (request, reply) => {
+  fastify.post('/api/campaigns/:id/launch', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string' }
+        }
+      }
+    }
+  }, async (request, reply) => {
     try {
-      const res = await launchCampaign(request.params.id);
+      const res = await launchCampaign(request.params.id, { async: true });
       return reply.send(res);
     } catch (err) {
-      return reply.status(400).send({ error: err.message });
+      const status = err.message && err.message.includes('not found') ? 404 : 400;
+      return reply.status(status).send({ error: err.message });
+    }
+  });
+
+  fastify.get('/api/campaigns/:id/launch-status', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const status = getLaunchStatus(request.params.id);
+      if (!status || status.status === 'not_found') {
+        return reply.status(404).send({ error: 'Campaign not found' });
+      }
+      return reply.send(status);
+    } catch (err) {
+      return reply.status(500).send({ error: err.message });
     }
   });
 
@@ -344,9 +577,24 @@ export function createAdminServer(options = {}) {
     return reply.send(leads);
   });
 
-  fastify.get('/api/campaigns/:id/leads/:leadId/timeline', async (request, reply) => {
-    const timeline = getLeadTimeline(request.params.id, request.params.leadId);
-    return reply.send(timeline);
+  fastify.get('/api/campaigns/:id/leads/:leadId/timeline', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id', 'leadId'],
+        properties: {
+          id: { type: 'string' },
+          leadId: { type: 'string' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const timeline = getLeadTimeline(request.params.leadId, request.params.id);
+      return reply.send(timeline);
+    } catch (err) {
+      return reply.status(500).send({ error: err.message });
+    }
   });
 
   fastify.get('/api/campaigns/:id/export', async (request, reply) => {
@@ -373,7 +621,25 @@ export function createAdminServer(options = {}) {
   });
 
   // Create new campaign from filtered segment (e.g., "opened_no_reply" or "never_opened")
-  fastify.post('/api/campaigns/:id/create-from-segment', async (request, reply) => {
+  fastify.post('/api/campaigns/:id/create-from-segment', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string' }
+        }
+      },
+      body: {
+        type: 'object',
+        required: ['segment'],
+        properties: {
+          segment: { type: 'string' },
+          name: { type: 'string' }
+        }
+      }
+    }
+  }, async (request, reply) => {
     const { segment, name } = request.body || {};
     const db = getDb();
     const origCampaign = getCampaign(request.params.id);
@@ -393,7 +659,7 @@ export function createAdminServer(options = {}) {
     const newListId = Number(listRes.lastInsertRowid);
 
     // Copy leads into new list
-    const insertLead = db.prepare('INSERT INTO leads (list_id, email, first_name, last_name, company, status) VALUES (?, ?, ?, ?, ?, "active")');
+    const insertLead = db.prepare("INSERT INTO leads (list_id, email, first_name, last_name, company, status) VALUES (?, ?, ?, ?, ?, 'active')");
     for (const lead of segmentLeads.items) {
       insertLead.run(newListId, lead.email, lead.first_name, lead.last_name, lead.company);
     }
@@ -480,9 +746,35 @@ export function createAdminServer(options = {}) {
 if (process.argv[1] && process.argv[1].endsWith('admin.js')) {
   const server = createAdminServer({ logger: true });
 
-  // Start background schedulers
+  // 1.4 Start background schedulers (engine, replies, warmup)
   startEngine(config.scheduler.intervalMs);
   startReplyPoller(120000);
+  startWarmupRunner(300000);
+
+  // 4.4 Port 25 background check at startup and every 15 minutes
+  detectPort25Availability().catch(() => {});
+  const port25Timer = setInterval(() => {
+    detectPort25Availability().catch(() => {});
+  }, 15 * 60 * 1000);
+  port25Timer.unref();
+
+  // 4.8 Greylist retry processor
+  const retryTimer = setInterval(() => {
+    runGreylistRetryTick(verifyEmail).catch(() => {});
+  }, 60 * 1000);
+  retryTimer.unref();
+
+  const shutdown = async () => {
+    console.log('Shutting down MailCheck background services...');
+    stopEngine();
+    stopReplyPoller();
+    stopWarmupRunner();
+    await server.close();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 
   server.listen({ host: config.admin.host, port: config.admin.port }, (err, address) => {
     if (err) {
