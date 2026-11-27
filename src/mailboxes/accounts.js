@@ -91,13 +91,13 @@ export async function createMailbox(data, options = {}) {
       smtp_host, smtp_port, smtp_secure, smtp_user, smtp_pass_encrypted,
       imap_host, imap_port, imap_secure, imap_user, imap_pass_encrypted,
       status, daily_warmup_target, warmup_start_date, campaign_daily_cap,
-      allow_self_signed
+      allow_self_signed, dkim_selector, allow_failed_dns
     ) VALUES (
       ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?,
-      ?
+      ?, ?, ?
     )
   `);
 
@@ -121,7 +121,9 @@ export async function createMailbox(data, options = {}) {
     data.daily_warmup_target || 40,
     warmupStartDate,
     data.campaign_daily_cap || 50,
-    data.allow_self_signed ? 1 : 0
+    data.allow_self_signed ? 1 : 0,
+    data.dkim_selector ? data.dkim_selector.trim() : null,
+    data.allow_failed_dns ? 1 : 0
   );
 
   const mailboxId = Number(res.lastInsertRowid);
@@ -184,7 +186,10 @@ export function listMailboxes() {
     `).get(row.id);
 
     item.dns = dnsRow || null;
-    item.canSend = dnsRow ? (dnsRow.spf_status !== 'fail' && dnsRow.dkim_status !== 'fail') : true;
+    // 6.1 Rule: Allow sending despite DKIM/SPF failure if allow_failed_dns is enabled
+    item.canSend = Boolean(row.allow_failed_dns)
+      ? true
+      : (dnsRow ? (dnsRow.spf_status !== 'fail' && dnsRow.dkim_status !== 'fail') : true);
     item.limits = getMailboxLimits(row);
 
     return item;
@@ -265,6 +270,14 @@ export function updateMailbox(id, updates) {
   if (updates.allow_self_signed !== undefined) {
     fields.push('allow_self_signed = ?');
     values.push(updates.allow_self_signed ? 1 : 0);
+  }
+  if (updates.dkim_selector !== undefined) {
+    fields.push('dkim_selector = ?');
+    values.push(updates.dkim_selector ? updates.dkim_selector.trim() : null);
+  }
+  if (updates.allow_failed_dns !== undefined) {
+    fields.push('allow_failed_dns = ?');
+    values.push(updates.allow_failed_dns ? 1 : 0);
   }
 
   if (fields.length === 0) return getMailboxById(id);

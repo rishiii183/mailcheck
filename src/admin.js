@@ -303,9 +303,43 @@ export function createAdminServer(options = {}) {
     return reply.send(listMailboxes());
   });
 
-  fastify.post('/api/mailboxes', async (request, reply) => {
+  // 6.3 Mailbox creation with connection testing and status validation
+  fastify.post('/api/mailboxes', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['email', 'smtp_host', 'smtp_user', 'smtp_pass', 'imap_host', 'imap_user', 'imap_pass'],
+        properties: {
+          email: { type: 'string' },
+          display_name: { type: 'string' },
+          smtp_host: { type: 'string' },
+          smtp_port: { type: 'number' },
+          smtp_secure: { type: 'boolean' },
+          smtp_user: { type: 'string' },
+          smtp_pass: { type: 'string' },
+          imap_host: { type: 'string' },
+          imap_port: { type: 'number' },
+          imap_secure: { type: 'boolean' },
+          imap_user: { type: 'string' },
+          imap_pass: { type: 'string' },
+          status: { type: 'string', enum: ['ready', 'warming', 'paused'] },
+          dkim_selector: { type: ['string', 'null'] },
+          allow_failed_dns: { type: 'number' },
+          allow_self_signed: { type: 'number' },
+          daily_warmup_target: { type: 'number' },
+          campaign_daily_cap: { type: 'number' }
+        }
+      }
+    }
+  }, async (request, reply) => {
     try {
-      const mb = await createMailbox(request.body);
+      const { status } = request.body;
+      if (status && !['ready', 'warming', 'paused'].includes(status)) {
+        return reply.status(400).send({ error: `Invalid status: '${status}'. Must be 'ready', 'warming', or 'paused'` });
+      }
+      // 6.3: Run connection test before saving unless skipTest=true explicitly passed
+      const testFirst = request.query?.skipTest === 'true' ? false : true;
+      const mb = await createMailbox(request.body, { testFirst });
       return reply.send(mb);
     } catch (err) {
       return reply.status(400).send({ error: err.message });
@@ -355,14 +389,39 @@ export function createAdminServer(options = {}) {
     return reply.send({ health, plan, mailbox: mb });
   });
 
-  fastify.post('/api/mailboxes/:id/warmup/:action', async (request, reply) => {
-    const { id, action } = request.params;
-    let newStatus = 'warming';
-    if (action === 'pause') newStatus = 'paused';
-    if (action === 'resume' || action === 'start') newStatus = 'warming';
+  // 6.3 Validate warmup action: accept only start, pause, resume
+  fastify.post('/api/mailboxes/:id/warmup/:action', {
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id', 'action'],
+        properties: {
+          id: { type: 'string' },
+          action: { type: 'string', enum: ['start', 'pause', 'resume'] }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const { id, action } = request.params;
+      if (!['start', 'pause', 'resume'].includes(action)) {
+        return reply.status(400).send({ error: "Invalid action. Must be 'start', 'pause', or 'resume'" });
+      }
 
-    const updated = updateMailbox(id, { status: newStatus });
-    return reply.send(updated);
+      const mb = getMailboxById(id);
+      if (!mb) {
+        return reply.status(404).send({ error: 'Mailbox not found' });
+      }
+
+      let newStatus = 'warming';
+      if (action === 'pause') newStatus = 'paused';
+      if (action === 'resume' || action === 'start') newStatus = 'warming';
+
+      const updated = updateMailbox(id, { status: newStatus });
+      return reply.send(updated);
+    } catch (err) {
+      return reply.status(400).send({ error: err.message });
+    }
   });
 
   // 5.7 Warmup pool & delivery status summary

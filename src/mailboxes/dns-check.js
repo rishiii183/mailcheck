@@ -45,9 +45,24 @@ export async function checkMailboxDns(domain, mailboxId = null, dnsClient = dns)
     result.spf.detail = `Failed to query SPF TXT records: ${err.message}`;
   }
 
-  // 2. Check DKIM across common selectors
+  // 2. Check DKIM (6.1: If dkim_selector set on mailbox, check only that selector first)
+  let customSelector = null;
+  if (mailboxId) {
+    try {
+      const db = getDb();
+      const mb = db.prepare('SELECT dkim_selector FROM mailboxes WHERE id = ?').get(mailboxId);
+      if (mb && mb.dkim_selector && mb.dkim_selector.trim()) {
+        customSelector = mb.dkim_selector.trim();
+      }
+    } catch {}
+  }
+
+  const selectorsToCheck = customSelector
+    ? [customSelector, ...COMMON_DKIM_SELECTORS.filter(s => s !== customSelector)]
+    : COMMON_DKIM_SELECTORS;
+
   let dkimFound = false;
-  for (const selector of COMMON_DKIM_SELECTORS) {
+  for (const selector of selectorsToCheck) {
     try {
       const dkimHost = `${selector}._domainkey.${cleanDomain}`;
       const dkimTxt = await dnsClient.resolveTxt(dkimHost);
@@ -69,7 +84,7 @@ export async function checkMailboxDns(domain, mailboxId = null, dnsClient = dns)
 
   if (!dkimFound) {
     result.dkim.status = 'fail';
-    result.dkim.detail = `No DKIM public key found on standard selectors (${COMMON_DKIM_SELECTORS.slice(0, 5).join(', ')}). Configure DKIM in your email provider.`;
+    result.dkim.detail = `No DKIM public key found on selectors (${selectorsToCheck.slice(0, 5).join(', ')}). Configure DKIM in your email provider.`;
   }
 
   // 3. Check DMARC
@@ -155,6 +170,12 @@ export async function checkMailboxDns(domain, mailboxId = null, dnsClient = dns)
 export function canMailboxSend(mailboxId) {
   try {
     const db = getDb();
+    // 6.1 Rule: Per-mailbox override "Allow sending despite DKIM/SPF failure"
+    const mb = db.prepare('SELECT allow_failed_dns FROM mailboxes WHERE id = ?').get(mailboxId);
+    if (mb && mb.allow_failed_dns) {
+      return { canSend: true, override: true, spf: 'override', dkim: 'override' };
+    }
+
     const row = db.prepare(`
       SELECT spf_status, dkim_status, dmarc_status, mx_status
       FROM mailbox_dns_checks

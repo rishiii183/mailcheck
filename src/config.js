@@ -73,7 +73,9 @@ export const config = {
     baseUrl: process.env.PUBLIC_BASE_URL ? process.env.PUBLIC_BASE_URL.replace(/\/+$/, '') : ''
   },
   db: {
-    path: process.env.DB_PATH || path.join(dataDir, 'mailcheck.db')
+    path: process.env.DB_PATH
+      ? (path.isAbsolute(process.env.DB_PATH) ? process.env.DB_PATH : path.resolve(rootDir, process.env.DB_PATH))
+      : path.join(dataDir, 'mailcheck.db')
   },
   security: {
     encryptionKey

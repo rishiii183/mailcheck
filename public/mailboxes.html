@@ -230,6 +230,22 @@
           </div>
         </div>
 
+        <h3 style="font-size: 13px; text-transform:uppercase; color:var(--text-secondary); margin: 16px 0 10px; border-top:1px solid var(--border); padding-top:12px;">DNS & Authentication Overrides</h3>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+          <div class="form-group">
+            <label>DKIM Selector (optional)</label>
+            <input type="text" id="mbDkimSelector" placeholder="default (or google, k1, etc.)">
+            <small style="color:var(--text-muted); font-size:11px;">If provided, MailCheck checks this selector first during DNS verification.</small>
+          </div>
+          <div class="form-group" style="display:flex; flex-direction:column; justify-content:center;">
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+              <input type="checkbox" id="mbAllowFailedDns">
+              <span>Allow sending despite DKIM/SPF failure</span>
+            </label>
+            <small style="color:var(--text-muted); font-size:11px;">Override sending blocks if DNS is misconfigured (warning banner will display).</small>
+          </div>
+        </div>
+
         <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
           <button type="button" class="btn btn-secondary" onclick="closeMailboxModal()">Cancel</button>
           <button type="submit" class="btn btn-primary" id="btnSaveMailbox">Save & Test Connection</button>
@@ -295,6 +311,8 @@
           return;
         }
 
+        const esc = window.escapeHtml || (s => s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;') : '');
+
         for (const m of mailboxes) {
           const limits = m.limits || {};
           let dnsBadge = '<span class="badge badge-unknown">Pending</span>';
@@ -307,6 +325,9 @@
               dnsBadge = '<span class="badge badge-warn">WARN</span>';
             }
           }
+          if (m.allow_failed_dns) {
+            dnsBadge += ' <span class="badge badge-warn" title="DNS Check Override Enabled">OVERRIDE</span>';
+          }
 
           let stageText = m.status === 'warming' ? `Day ${limits.warmupDay || 1}` : 'Active';
           let actions = '';
@@ -316,15 +337,19 @@
             actions += `<button class="btn btn-primary btn-sm" onclick="resumeWarmup(${m.id})">Resume</button> `;
           }
 
+          const safeEmail = esc(m.email);
+          const safeName = esc(m.display_name || '');
+          const safeStatus = esc(m.status);
+
           actions += `
-            <button class="btn btn-secondary btn-sm" onclick="viewMailboxDetails(${m.id}, '${m.email}')">Inspect</button>
+            <button class="btn btn-secondary btn-sm" onclick="viewMailboxDetails(${m.id}, '${esc(m.email)}')">Inspect</button>
             <button class="btn btn-danger btn-sm" onclick="deleteMailbox(${m.id})">✕</button>
           `;
 
           tbody.innerHTML += `
             <tr>
-              <td><strong>${m.email}</strong><br><span style="color:var(--text-muted); font-size:11px;">${m.display_name}</span></td>
-              <td><span class="badge badge-${m.status}">${m.status}</span></td>
+              <td><strong>${safeEmail}</strong><br><span style="color:var(--text-muted); font-size:11px;">${safeName}</span></td>
+              <td><span class="badge badge-${safeStatus}">${safeStatus}</span></td>
               <td>${dnsBadge}</td>
               <td>${stageText}</td>
               <td>${limits.sentToday || 0} / ${limits.effectiveCap || m.campaign_daily_cap}</td>
@@ -455,7 +480,9 @@
         imap_pass: document.getElementById('mbImapPass').value,
         status: document.getElementById('mbStatus').value,
         campaign_daily_cap: parseInt(document.getElementById('mbCampaignCap').value, 10),
-        daily_warmup_target: parseInt(document.getElementById('mbWarmupTarget').value, 10)
+        daily_warmup_target: parseInt(document.getElementById('mbWarmupTarget').value, 10),
+        dkim_selector: document.getElementById('mbDkimSelector').value.trim() || null,
+        allow_failed_dns: document.getElementById('mbAllowFailedDns').checked ? 1 : 0
       };
 
       try {

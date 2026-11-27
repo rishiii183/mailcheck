@@ -13,14 +13,19 @@ export function initDb(dbPath = config.db.path) {
     dbInstance = null;
   }
 
-  if (dbPath !== ':memory:') {
-    const dir = path.dirname(dbPath);
+  // 6.5 Rule: Make DB_PATH resolve relative to project root
+  const resolvedPath = (dbPath !== ':memory:' && !path.isAbsolute(dbPath))
+    ? path.resolve(config.rootDir, dbPath)
+    : dbPath;
+
+  if (resolvedPath !== ':memory:') {
+    const dir = path.dirname(resolvedPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
   }
 
-  const db = new Database(dbPath);
+  const db = new Database(resolvedPath);
 
   // High performance & concurrency SQLite pragmas
   db.pragma('journal_mode = WAL');
@@ -79,6 +84,8 @@ export function migrate(db) {
       warmup_start_date TEXT,
       campaign_daily_cap INTEGER DEFAULT 50,
       next_send_at DATETIME,
+      dkim_selector TEXT DEFAULT NULL,
+      allow_failed_dns INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -364,6 +371,20 @@ export function migrate(db) {
   } catch (err) {}
   try {
     db.exec('ALTER TABLE mailboxes ADD COLUMN next_send_at DATETIME');
+  } catch (err) {}
+  try {
+    db.exec('ALTER TABLE mailboxes ADD COLUMN dkim_selector TEXT');
+  } catch (err) {}
+  try {
+    db.exec('ALTER TABLE mailboxes ADD COLUMN allow_failed_dns INTEGER DEFAULT 0');
+  } catch (err) {}
+
+  // 6.8 Cleanup: remove any test fixture rows left in the real database
+  try {
+    db.prepare('DELETE FROM lead_steps WHERE id = 999').run();
+  } catch (err) {}
+  try {
+    db.prepare('DELETE FROM suppression WHERE email = ?').run('audit_test@example.com');
   } catch (err) {}
 
   // Migration for duplicate leads removal and unique index on (list_id, email)

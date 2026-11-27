@@ -23,8 +23,22 @@ export function renderSpintax(text) {
 }
 
 /**
+ * 6.2 Rule: HTML escaping helper
+ */
+export function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
  * Replace variables {{var}} or {{var|fallback}}
  * Supports lead fields (first_name, last_name, company, email) and custom fields (custom.x)
+ * 6.2 Rule: Escapes lead fields to prevent HTML injection / XSS
  */
 export function renderVariables(template, lead = {}) {
   if (!template || typeof template !== 'string') return '';
@@ -44,10 +58,10 @@ export function renderVariables(template, lead = {}) {
     }
 
     if (value !== undefined && value !== null && String(value).trim() !== '') {
-      return String(value);
+      return escapeHtml(String(value));
     }
 
-    return fallback;
+    return escapeHtml(fallback);
   });
 }
 
@@ -108,10 +122,10 @@ export function rewriteLinks(html, registerLinkFn, publicBaseUrl) {
 export function injectTrackingAndFooter(html, { openToken, unsubscribeUrl, postalAddress, publicBaseUrl }) {
   let output = html || '';
 
-  // Footer HTML with postal address and visible unsubscribe
+  // Footer HTML with postal address and visible unsubscribe (6.2: escape postalAddress)
   const footerHtml = `
     <div class="mailcheck-footer" style="margin-top: 32px; padding-top: 16px; border-top: 1px solid #e2e8f0; font-family: sans-serif; font-size: 12px; color: #718096; line-height: 1.5;">
-      ${postalAddress ? `<p style="margin: 0 0 8px 0;">${postalAddress}</p>` : ''}
+      ${postalAddress ? `<p style="margin: 0 0 8px 0;">${escapeHtml(postalAddress)}</p>` : ''}
       <p style="margin: 0;">
         If you no longer wish to receive these emails, you can 
         <a href="${unsubscribeUrl}" style="color: #4a5568; text-decoration: underline;">unsubscribe here</a>.

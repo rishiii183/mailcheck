@@ -129,22 +129,25 @@ export function getMailboxLimits(mailbox, customDate = new Date()) {
 
 /**
  * Check if current time falls within schedule send window and days
+ * 6.6 Rule: Use hourCycle: 'h23' in Intl formatter to avoid the "24:00" midnight quirk
  * @param {Object} schedule 
+ * @param {Date} [date=new Date()]
  * @returns {boolean}
  */
-export function isWithinSendWindow(schedule) {
+export function isWithinSendWindow(schedule, date = new Date()) {
   const timezone = schedule.timezone || 'UTC';
   const sendDays = schedule.send_days || [1, 2, 3, 4, 5]; // 1 = Monday ... 7 = Sunday
   const windowStart = schedule.window_start || '09:00';
   const windowEnd = schedule.window_end || '17:00';
 
   // Format current time in campaign's timezone
-  const now = new Date();
+  const now = date || new Date();
   const timeFormatter = new Intl.DateTimeFormat('en-US', {
     timeZone: timezone,
     hour: '2-digit',
     minute: '2-digit',
-    hour12: false
+    hour12: false,
+    hourCycle: 'h23'
   });
   const weekdayFormatter = new Intl.DateTimeFormat('en-US', {
     timeZone: timezone,
@@ -168,8 +171,15 @@ export function isWithinSendWindow(schedule) {
     return false;
   }
 
-  if (currentMinutes < startMinutes || currentMinutes >= endMinutes) {
-    return false;
+  if (startMinutes <= endMinutes) {
+    if (currentMinutes < startMinutes || currentMinutes >= endMinutes) {
+      return false;
+    }
+  } else {
+    // Window crosses midnight (e.g., 22:00 - 04:00)
+    if (currentMinutes < startMinutes && currentMinutes >= endMinutes) {
+      return false;
+    }
   }
 
   return true;

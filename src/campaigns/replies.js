@@ -3,6 +3,7 @@ import { simpleParser } from 'mailparser';
 import { getDb } from '../db.js';
 import { getMailboxById, listMailboxes } from '../mailboxes/accounts.js';
 import { isBounceMessage, parseBounce, processBounce } from './bounces.js';
+import { addSuppression } from './suppression.js';
 
 let pollerInterval = null;
 
@@ -81,6 +82,22 @@ export function processIncomingEmail(parsed, mailboxId) {
   const subject = parsed.subject || '';
   const bodyText = parsed.text || '';
   const snippet = bodyText.replace(/\s+/g, ' ').trim().slice(0, 160);
+
+  // 6.4 Unsubscribe-by-email:
+  // When an incoming message goes to the List-Unsubscribe mailto address with subject containing "unsubscribe", add sender to suppression list
+  const isUnsubscribeSubject = subject && /unsubscribe/i.test(subject);
+  if (isUnsubscribeSubject && fromEmail) {
+    addSuppression(fromEmail, 'email_unsubscribe');
+    let leadRow = db.prepare('SELECT id FROM leads WHERE email = ?').get(fromEmail);
+    if (leadRow) {
+      db.prepare("UPDATE leads SET status = 'unsubscribed' WHERE id = ?").run(leadRow.id);
+      const stepRow = db.prepare('SELECT id FROM lead_steps WHERE lead_id = ? ORDER BY id DESC LIMIT 1').get(leadRow.id);
+      if (stepRow) {
+        db.prepare("INSERT INTO email_events (type, lead_step_id, meta_json) VALUES ('unsubscribe', ?, ?)").run(stepRow.id, JSON.stringify({ source: 'email' }));
+      }
+    }
+    return { isUnsubscribe: true, matched: true, suppressed: fromEmail };
+  }
 
   // Match reply by In-Reply-To or References (a)
   const inReplyTo = parsed.inReplyTo || null;
@@ -254,7 +271,7 @@ export async function pollMailboxReplies(mailbox, options = {}) {
         }
 
         const result = processIncomingEmail(parsed, mailbox.id);
-        if (result && (result.matched || result.isBounce)) {
+        if (result && (result.matched || result.isBounce || result.isUnsubscribe)) {
           uidsToFlagSeen.push(msg.uid);
         }
       }
