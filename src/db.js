@@ -292,6 +292,19 @@ export function migrate(db) {
       PRIMARY KEY (mailbox_id, folder)
     );
 
+    -- Verification Greylist Retries (4.8)
+    CREATE TABLE IF NOT EXISTS verification_retries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL UNIQUE,
+      attempt INTEGER DEFAULT 1,
+      next_retry_at DATETIME NOT NULL,
+      status TEXT DEFAULT 'pending', -- 'pending', 'completed', 'failed'
+      last_error TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_verification_retries_status ON verification_retries(status, next_retry_at);
+
     -- Performance & safety indexes
     CREATE INDEX IF NOT EXISTS idx_lead_steps_status_sched ON lead_steps(status, scheduled_at);
     CREATE INDEX IF NOT EXISTS idx_email_events_lead_step_type ON email_events(lead_step_id, type);

@@ -126,10 +126,24 @@
         const container = document.getElementById('bannerContainer');
         container.innerHTML = '';
 
-        if (!data.port25.available) {
+        if (!data.port25.checked) {
+          container.innerHTML += `
+            <div class="banner banner-info" style="background:rgba(59,130,246,0.15); border-left:4px solid #3b82f6; padding:12px; margin-bottom:12px; border-radius:6px;">
+              <span>ℹ️ <strong>Port 25 Check:</strong> Checking outbound port 25 availability...</span>
+            </div>
+          `;
+        } else if (!data.port25.available) {
           container.innerHTML += `
             <div class="banner banner-warning">
               <span>⚠️ <strong>Port 25 Outbound Blocked:</strong> Direct SMTP mailbox probe is blocked by your ISP or firewall. Email verification will mark SMTP checks as "unknown" without failing.</span>
+            </div>
+          `;
+        }
+
+        if (data.smtpIdentity && data.smtpIdentity.warning) {
+          container.innerHTML += `
+            <div class="banner banner-warning">
+              <span>⚠️ <strong>SMTP Identity Unconfigured:</strong> ${data.smtpIdentity.warning} Set <code>VERIFY_HELO_HOST</code> and <code>VERIFY_MAIL_FROM</code> in <code>.env</code>.</span>
             </div>
           `;
         }

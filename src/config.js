@@ -85,6 +85,13 @@ export const config = {
     disposableFile: path.join(dataDir, 'disposable.txt'),
     smtpTimeoutMs: parseInt(process.env.SMTP_TIMEOUT_MS || '7000', 10),
     mxTimeoutMs:   parseInt(process.env.MX_TIMEOUT_MS   || '5000', 10),
-    bulkConcurrency: parseInt(process.env.BULK_CONCURRENCY || '8', 10)
+    bulkConcurrency: parseInt(process.env.BULK_CONCURRENCY || '8', 10),
+    heloHost: process.env.VERIFY_HELO_HOST || 'mailcheck.local',
+    mailFrom: process.env.VERIFY_MAIL_FROM || 'verify@mailcheck.local',
+    identityConfigured: Boolean(process.env.VERIFY_HELO_HOST && process.env.VERIFY_MAIL_FROM)
   }
 };
+
+if (!config.verifier.identityConfigured && env !== 'test') {
+  console.warn('[Warning] VERIFY_HELO_HOST or VERIFY_MAIL_FROM is unset in .env. Accuracy will be reduced.');
+}

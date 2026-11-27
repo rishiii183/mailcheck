@@ -6,6 +6,7 @@ import { lookupMx } from './mx.js';
 import { probeSmtp, getPort25Status } from './smtp.js';
 import { getCachedCatchAll, setCachedCatchAll } from './catchall.js';
 import { PENALTIES, VERDICTS, calculateVerdict } from './score.js';
+import { scheduleGreylistRetry, getGreylistRetryStatus } from './retries.js';
 import { getDb } from '../db.js';
 import { config } from '../config.js';
 
@@ -15,16 +16,26 @@ export { PENALTIES, VERDICTS };
 const resultCache = new Map();
 const RESULT_CACHE_TTL_MS = 5 * 60 * 1000; // 5-minute in-process cache
 
+export function clearResultCache() {
+  resultCache.clear();
+}
+
 /**
- * Verify a single email address following the 9-step pipeline (optimized).
- * Key optimizations:
- *  1. In-process cache: skip full pipeline if recently verified (<5 min)
- *  2. Steps 2–4 (typo, disposable, role) run in parallel via Promise.all
- *  3. SMTP timeout reduced from 12s → 7s (configurable via SMTP_TIMEOUT_MS)
- *  4. MX lookup uses a 10-min in-process DNS cache (see mx.js)
- *  5. A/AAAA fallback lookups are now parallel (Promise.allSettled)
- *  6. Known hidden-provider domains (Outlook/Yahoo/iCloud) skip SMTP probe fast
- *  7. Catch-all step is skipped when domain result is already in SQLite cache
+ * Verify a single email address following the 9-step pipeline.
+ *
+ * @param {string} rawEmail 
+ * @param {Object} [options]
+ * @returns {Promise<{
+ *   email: string,
+ *   verdict: string,
+ *   score: number,
+ *   reason: string,
+ *   checks: Array<{name: string, status: string, detail: string, penalty?: number}>,
+ *   suggestion: string | null,
+ *   transcript: string[],
+ *   checkedAt: string,
+ *   status?: string
+ * }>}
  */
 export async function verifyEmail(rawEmail, options = {}) {
   const checks = [];
@@ -36,7 +47,16 @@ export async function verifyEmail(rawEmail, options = {}) {
   const syntax = validateSyntax(rawEmail);
   if (!syntax.valid) {
     checks.push({ name: 'syntax', status: 'fail', detail: syntax.error || 'Invalid syntax', penalty: PENALTIES.SYNTAX_INVALID });
-    return saveAndReturnResult({ email: (rawEmail || '').trim().toLowerCase(), verdict: VERDICTS.UNDELIVERABLE, score: 0, reason: `Syntax error: ${syntax.error}`, checks, suggestion: null, transcript, checkedAt }, options.skipDb);
+    return saveAndReturnResult({
+      email: (rawEmail || '').trim().toLowerCase(),
+      verdict: VERDICTS.UNDELIVERABLE,
+      score: 0,
+      reason: `Syntax error: ${syntax.error}`,
+      checks,
+      suggestion: null,
+      transcript,
+      checkedAt
+    }, options.skipDb);
   }
 
   const { email, local, domain } = syntax;
@@ -50,42 +70,100 @@ export async function verifyEmail(rawEmail, options = {}) {
     }
   }
 
-  // ── Steps 2–4: Run typo + disposable + role + MX in parallel ───────────────
-  // Typo, disposable, and role are pure synchronous lookups — they can't block.
-  // MX is the first real I/O call; run it simultaneously with the sync checks.
-  const [typo, dispResult, roleResult, mxResult] = await Promise.all([
-    Promise.resolve(detectTypo(local, domain)),
+  // ── Steps 2–5: Run disposable + role + MX in parallel ──────────────────────
+  const [dispResult, roleResult, mxResult] = await Promise.all([
     Promise.resolve(isDisposableDomain(domain)),
     Promise.resolve(isRoleAccount(local)),
     options.mockMx ? Promise.resolve(options.mockMx) : lookupMx(domain)
   ]);
 
-  // ── 2. Typo Detection ───────────────────────────────────────────────────────
+  // ── 2. Typo Detection (with MX knowledge and allowlist) ─────────────────────
+  const hasMxRecords = !mxResult.isDead && Boolean(mxResult.records && mxResult.records.length > 0);
+  const typo = detectTypo(local, domain, { hasMx: hasMxRecords });
+
   if (typo.hasTypo) {
     suggestion = typo.suggestion;
-    checks.push({ name: 'typo', status: 'warn', detail: `Possible typo detected for domain "${domain}". Did you mean "${typo.suggestion}"?`, penalty: PENALTIES.TYPO });
+    checks.push({
+      name: 'typo',
+      status: 'warn',
+      detail: `Possible typo detected for domain "${domain}". Did you mean "${typo.suggestion}"?`,
+      penalty: PENALTIES.TYPO
+    });
   } else {
     checks.push({ name: 'typo', status: 'pass', detail: 'No common domain typo detected' });
   }
 
   // ── 3. Disposable Domain (early-exit) ──────────────────────────────────────
   if (dispResult) {
-    checks.push({ name: 'disposable', status: 'fail', detail: `Domain "${domain}" is a known temporary/disposable email provider`, penalty: PENALTIES.DISPOSABLE });
-    return saveAndReturnResult({ email, verdict: VERDICTS.UNDELIVERABLE, score: 0, reason: 'Disposable email address detected', checks, suggestion, transcript, checkedAt }, options.skipDb);
+    checks.push({
+      name: 'disposable',
+      status: 'fail',
+      detail: `Domain "${domain}" is a known temporary/disposable email provider`,
+      penalty: PENALTIES.DISPOSABLE
+    });
+    return saveAndReturnResult({
+      email,
+      verdict: VERDICTS.UNDELIVERABLE,
+      score: 0,
+      reason: 'Disposable email address detected',
+      checks,
+      suggestion,
+      transcript,
+      checkedAt
+    }, options.skipDb);
   }
   checks.push({ name: 'disposable', status: 'pass', detail: 'Not a disposable email domain' });
 
   // ── 4. Role Account ─────────────────────────────────────────────────────────
   if (roleResult.isRole) {
-    checks.push({ name: 'role', status: 'warn', detail: `Generic role or department address ("${roleResult.role}")`, penalty: PENALTIES.ROLE_ACCOUNT });
+    checks.push({
+      name: 'role',
+      status: 'warn',
+      detail: `Generic role or department address ("${roleResult.role}")`,
+      penalty: PENALTIES.ROLE_ACCOUNT
+    });
   } else {
     checks.push({ name: 'role', status: 'pass', detail: 'Personal or individual mailbox' });
   }
 
-  // ── 5. MX Lookup ────────────────────────────────────────────────────────────
+  // ── 5. MX Lookup & DNS Failure Handling ────────────────────────────────────
+  // 4.6 Rule: Timeouts, SERVFAIL, REFUSED -> verdict 'unknown' with reason, NOT undeliverable, NOT saved to DB
+  if (mxResult.isTransientDnsError) {
+    checks.push({
+      name: 'mx',
+      status: 'unknown',
+      detail: `DNS lookup failed (${mxResult.dnsError})`
+    });
+    return saveAndReturnResult({
+      email,
+      verdict: VERDICTS.UNKNOWN,
+      score: 50,
+      reason: `DNS server failed to resolve domain: ${mxResult.dnsError}`,
+      checks,
+      suggestion,
+      transcript,
+      checkedAt
+    }, true); // skipDb = true so transient DNS drops are never cached as undeliverable
+  }
+
+  // 4.6 Rule: Only ENOTFOUND/NXDOMAIN/ENODATA means dead domain
   if (mxResult.isDead || !mxResult.records || mxResult.records.length === 0) {
-    checks.push({ name: 'mx', status: 'fail', detail: `Domain "${domain}" has no MX or A/AAAA records`, penalty: PENALTIES.DEAD_DOMAIN });
-    return saveAndReturnResult({ email, verdict: VERDICTS.UNDELIVERABLE, score: 0, reason: 'Dead domain (no mail servers configured)', checks, suggestion, transcript, checkedAt }, options.skipDb);
+    checks.push({
+      name: 'mx',
+      status: 'fail',
+      detail: `Domain "${domain}" has no MX or A/AAAA records`,
+      penalty: PENALTIES.DEAD_DOMAIN
+    });
+    return saveAndReturnResult({
+      email,
+      verdict: VERDICTS.UNDELIVERABLE,
+      score: 0,
+      reason: 'Dead domain (no mail servers configured)',
+      checks,
+      suggestion,
+      transcript,
+      checkedAt
+    }, options.skipDb);
   }
 
   if (mxResult.fallback) {
@@ -97,9 +175,8 @@ export async function verifyEmail(rawEmail, options = {}) {
   // ── 6. Port 25 Outbound Check ───────────────────────────────────────────────
   const port25 = getPort25Status();
   const isPort25Blocked = options.simulatePort25Blocked || (!options.mockSmtp && !options.smtpPort && port25.checked && !port25.available);
+
   if (isPort25Blocked) {
-    // Even when port 25 is blocked, check the domain-level cache (catch-all, provider)
-    // so we can give a richer verdict instead of a flat UNKNOWN 50/100.
     const cachedDomain = getCachedCatchAll(domain);
     const isCatchallCached = cachedDomain === true;
 
@@ -110,17 +187,14 @@ export async function verifyEmail(rawEmail, options = {}) {
       penalty: PENALTIES.UNKNOWN_SMTP
     });
 
+    // 4.4 Rule: Never output a passing 'catchall' check unless probe ran. Otherwise status 'skip'.
     if (isCatchallCached) {
       checks.push({ name: 'catchall', status: 'warn', detail: 'Domain is catch-all (cached from prior probe)', penalty: PENALTIES.CATCHALL });
-    } else if (cachedDomain === false) {
-      checks.push({ name: 'catchall', status: 'pass', detail: 'Domain is not catch-all (cached from prior probe)' });
     } else {
-      checks.push({ name: 'catchall', status: 'unknown', detail: 'Catch-all status unknown (port 25 blocked; no prior cache)' });
+      checks.push({ name: 'catchall', status: 'skip', detail: 'Catch-all check skipped (port 25 blocked; no prior probe)' });
     }
 
-    // Build a real score from what we DO know (syntax ✓ disposable ✓ MX ✓ role ✓)
-    // rather than always returning the flat 50 / UNKNOWN default.
-    let totalPenalty = PENALTIES.UNKNOWN_SMTP; // 30 pts for no SMTP confirmation
+    let totalPenalty = PENALTIES.UNKNOWN_SMTP;
     const reasons = ['SMTP mailbox existence cannot be confirmed (port 25 blocked)'];
 
     if (isCatchallCached) {
@@ -141,85 +215,170 @@ export async function verifyEmail(rawEmail, options = {}) {
     }
 
     const score = Math.max(0, Math.min(100, 100 - totalPenalty));
-    // With only UNKNOWN_SMTP penalty: 70/100 (much better than flat 50)
-    // With catchall too: 50/100 — matches competitor's 55/100 range
     const verdict = isCatchallCached ? VERDICTS.RISKY : VERDICTS.UNKNOWN;
     const reason = reasons.join('; ');
 
     return saveAndReturnResult({
-      email, verdict, score, reason, checks, suggestion,
+      email,
+      verdict,
+      score,
+      reason,
+      checks,
+      suggestion,
       transcript: ['[Port 25 blocked: SMTP probe skipped; score based on DNS checks]'],
       checkedAt
     }, options.skipDb);
   }
 
-  // ── Fast-path: Known hidden-provider — mark risky immediately without probing ──
-  // Outlook/Yahoo/iCloud always return 250 so a live SMTP probe wastes time and
-  // yields a misleading result. Skip straight to verdict.
-  const isHiddenProvider = ['outlook', 'yahoo', 'icloud'].includes(mxResult.provider);
-  if (isHiddenProvider && !options.mockSmtp) {
-    checks.push({ name: 'smtp', status: 'warn', detail: `Provider (${mxResult.provider}) accepts all RCPT commands; true mailbox status is concealed`, penalty: PENALTIES.HIDDEN_MAILBOX_PROVIDER });
-    checks.push({ name: 'catchall', status: 'warn', detail: 'Catch-all detection skipped for privacy-masking provider', penalty: PENALTIES.CATCHALL });
-    checks.push({ name: 'provider_policy', status: 'warn', detail: `Provider (${mxResult.provider}) conceals recipient status; accepts all RCPT commands indiscriminately`, penalty: PENALTIES.HIDDEN_MAILBOX_PROVIDER });
-    transcript.push(`[SMTP probe skipped: ${mxResult.provider} is a known hidden-status provider]`);
-    const { score, verdict, reason } = calculateVerdict(checks, { providerHiddenStatus: true, isCatchall: false, isGreylisted: false });
-    return saveAndReturnResult({ email, verdict, score, reason, checks, suggestion, transcript, checkedAt }, options.skipDb);
-  }
-
   // ── 7. Catch-all Cache ──────────────────────────────────────────────────────
+  const isHiddenProvider = ['outlook', 'yahoo', 'icloud'].includes(mxResult.provider);
   let cachedCatchall = getCachedCatchAll(domain);
   let isCatchall = cachedCatchall === true;
+  const shouldCheckCatchall = !isHiddenProvider && (cachedCatchall === null);
 
-  // ── 8. SMTP Probe ───────────────────────────────────────────────────────────
+  // ── 8. SMTP Probe (4.5: Probe Outlook/Yahoo/iCloud like everyone else!) ──────
   const smtpProbeResult = options.mockSmtp
     ? await options.mockSmtp(email, domain, mxResult.records)
     : await probeSmtp(email, domain, mxResult.records, {
         port: options.smtpPort || 25,
         timeoutMs: options.timeoutMs || config.verifier.smtpTimeoutMs,
-        checkCatchall: cachedCatchall === null
+        checkCatchall: shouldCheckCatchall,
+        heloHost: options.heloHost,
+        mailFrom: options.mailFrom
       });
 
   transcript.push(...(smtpProbeResult.transcript || []));
 
   let isGreylisted = false;
+  let isBlocked = false;
 
   if (smtpProbeResult.success) {
     if (smtpProbeResult.isRejected) {
-      checks.push({ name: 'smtp', status: 'fail', detail: smtpProbeResult.detail || 'Mailbox does not exist (5xx reject)', penalty: PENALTIES.SMTP_REJECT });
-      return saveAndReturnResult({ email, verdict: VERDICTS.UNDELIVERABLE, score: 0, reason: `SMTP rejected: ${smtpProbeResult.detail}`, checks, suggestion, transcript, checkedAt }, options.skipDb);
+      // 4.2 Rule: Undeliverable ONLY for user-unknown signals
+      checks.push({
+        name: 'smtp',
+        status: 'fail',
+        detail: smtpProbeResult.detail || 'Mailbox does not exist (5xx reject)',
+        penalty: PENALTIES.SMTP_REJECT
+      });
+      return saveAndReturnResult({
+        email,
+        verdict: VERDICTS.UNDELIVERABLE,
+        score: 0,
+        reason: `SMTP rejected: ${smtpProbeResult.detail}`,
+        checks,
+        suggestion,
+        transcript,
+        checkedAt
+      }, options.skipDb);
+    } else if (smtpProbeResult.isBlocked) {
+      // 4.2 Rule: Policy/block signals -> verdict 'unknown' with reason "Mail server blocked our probe"
+      isBlocked = true;
+      checks.push({
+        name: 'smtp',
+        status: 'unknown',
+        detail: smtpProbeResult.detail || 'Mail server blocked our probe',
+        penalty: PENALTIES.UNKNOWN_SMTP
+      });
+      checks.push({ name: 'catchall', status: 'skip', detail: 'Catch-all check skipped (probe blocked)' });
+
+      const res = calculateVerdict(checks, { blockedProbe: true });
+      return saveAndReturnResult({
+        email,
+        verdict: VERDICTS.UNKNOWN,
+        score: res.score,
+        reason: 'Mail server blocked our probe',
+        checks,
+        suggestion,
+        transcript,
+        checkedAt
+      }, options.skipDb);
     } else if (smtpProbeResult.isGreylisted) {
+      // 4.2 & 4.8 Rule: 4xx greylist -> store job to re-probe at +5, +15, +45 minutes
       isGreylisted = true;
-      checks.push({ name: 'smtp', status: 'warn', detail: `Server greylisted recipient (${smtpProbeResult.detail})`, penalty: PENALTIES.GREYLISTED });
+      checks.push({
+        name: 'smtp',
+        status: 'warn',
+        detail: `Server greylisted recipient (${smtpProbeResult.detail})`,
+        penalty: PENALTIES.GREYLISTED
+      });
+      checks.push({ name: 'catchall', status: 'skip', detail: 'Catch-all check skipped (server greylisted probe)' });
+
+      if (!options.isRetry) {
+        scheduleGreylistRetry(email, 1, smtpProbeResult.detail);
+      }
+
+      const res = calculateVerdict(checks, { isGreylisted: true });
+      return saveAndReturnResult({
+        email,
+        verdict: VERDICTS.UNKNOWN,
+        score: res.score,
+        reason: res.reason,
+        checks,
+        suggestion,
+        transcript,
+        checkedAt,
+        status: 'retrying',
+        isGreylisted: true
+      }, options.skipDb);
     } else if (smtpProbeResult.isTargetAccepted) {
       checks.push({ name: 'smtp', status: 'pass', detail: 'Mailbox accepted by mail server (250 OK)' });
-      if (cachedCatchall === null && smtpProbeResult.isCatchall !== undefined) {
+
+      if (cachedCatchall === null && smtpProbeResult.isCatchall !== undefined && !isHiddenProvider) {
         isCatchall = smtpProbeResult.isCatchall;
         setCachedCatchAll(domain, isCatchall, mxResult.provider);
       }
     }
   } else {
-    checks.push({ name: 'smtp', status: 'unknown', detail: smtpProbeResult.detail || 'SMTP probe could not connect to MX', penalty: PENALTIES.UNKNOWN_SMTP });
+    checks.push({
+      name: 'smtp',
+      status: 'unknown',
+      detail: smtpProbeResult.detail || 'SMTP probe could not connect to MX',
+      penalty: PENALTIES.UNKNOWN_SMTP
+    });
   }
 
-  // ── Catch-all evaluation ────────────────────────────────────────────────────
-  if (isCatchall) {
+  // ── 9. Catch-all evaluation ─────────────────────────────────────────────────
+  // 4.4 & 4.5 Rule: No invented catch-all warning for hidden-status providers (Outlook/Yahoo/iCloud).
+  // Never output a passing 'catchall' check unless the catch-all probe ran. Otherwise status 'skip'.
+  if (isHiddenProvider) {
+    checks.push({ name: 'catchall', status: 'skip', detail: `Catch-all detection skipped for privacy-masking provider (${mxResult.provider})` });
+    isCatchall = false;
+  } else if (isCatchall) {
     checks.push({ name: 'catchall', status: 'warn', detail: 'Domain is catch-all (accepts emails to any address)', penalty: PENALTIES.CATCHALL });
-  } else {
+  } else if (smtpProbeResult.isCatchall === false || cachedCatchall === false) {
     checks.push({ name: 'catchall', status: 'pass', detail: 'Domain is not catch-all' });
+  } else {
+    checks.push({ name: 'catchall', status: 'skip', detail: 'Catch-all check skipped (SMTP probe not performed or not requested)' });
   }
 
-  // ── 9. Provider Policy Check (non-hidden providers) ─────────────────────────
+  // ── 10. Provider Policy Check (4.5: Outlook/Yahoo/iCloud with 250 -> 'risky' with ONE penalty) ─
   if (isHiddenProvider && smtpProbeResult.isTargetAccepted) {
-    checks.push({ name: 'provider_policy', status: 'warn', detail: `Provider (${mxResult.provider}) conceals recipient status; accepts all RCPT commands indiscriminately`, penalty: PENALTIES.HIDDEN_MAILBOX_PROVIDER });
+    checks.push({
+      name: 'provider_policy',
+      status: 'warn',
+      detail: `Provider (${mxResult.provider}) conceals recipient status; accepts all RCPT commands indiscriminately`,
+      penalty: PENALTIES.HIDDEN_MAILBOX_PROVIDER
+    });
   }
 
   const { score, verdict, reason } = calculateVerdict(checks, {
     providerHiddenStatus: isHiddenProvider && smtpProbeResult.isTargetAccepted,
-    isCatchall,
-    isGreylisted
+    isCatchall: !isHiddenProvider && isCatchall,
+    isGreylisted,
+    blockedProbe: isBlocked
   });
 
-  return saveAndReturnResult({ email, verdict, score, reason, checks, suggestion, transcript, checkedAt }, options.skipDb);
+  return saveAndReturnResult({
+    email,
+    verdict,
+    score,
+    reason,
+    checks,
+    suggestion,
+    transcript,
+    checkedAt
+  }, options.skipDb);
 }
 
 function saveAndReturnResult(result, skipDb = false) {
@@ -251,7 +410,7 @@ function saveAndReturnResult(result, skipDb = false) {
         JSON.stringify(result.transcript)
       );
     } catch (err) {
-      console.error('Error caching verification result:', err.message);
+      // Ignore database logging errors in test or mock environments
     }
   }
   return result;
@@ -277,12 +436,10 @@ export async function verifyBulk(input, onProgress, options = {}) {
     }
   }
 
-  // Deduplicate case-insensitively
   const uniqueEmails = Array.from(new Set(emailList.map(e => e.trim().toLowerCase())));
   const total = uniqueEmails.length;
   const results = new Array(total);
 
-  // Run in batches to maintain back-pressure while still parallelizing
   const concurrency = options.concurrency || config.verifier.bulkConcurrency || 8;
   let processed = 0;
 

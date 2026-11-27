@@ -6,7 +6,8 @@ import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import { getDb, getSetting, setSetting, getAllSettings } from './db.js';
 import { verifyEmail, verifyBulk, VERDICTS } from './verifier/index.js';
-import { getPort25Status } from './verifier/smtp.js';
+import { getPort25Status, detectPort25Availability } from './verifier/smtp.js';
+import { runGreylistRetryTick } from './verifier/retries.js';
 import { createMailbox, getMailboxById, listMailboxes, updateMailbox, deleteMailbox, testMailboxConnection } from './mailboxes/accounts.js';
 import { checkMailboxDns } from './mailboxes/dns-check.js';
 import { getMailboxHealth, getWarmupPlan } from './warmup/health.js';
@@ -92,9 +93,23 @@ export function createAdminServer(options = {}) {
 
     return reply.send({
       port25: {
+        checked: port25.checked,
         available: port25.available,
         checkedAt: port25.checkedAt,
-        message: port25.available ? 'Outbound port 25 is open' : 'Outbound port 25 appears blocked by ISP/firewall. Verification will mark SMTP checks as unknown.'
+        error: port25.error,
+        message: !port25.checked
+          ? 'Checking outbound port 25 availability...'
+          : port25.available
+            ? 'Outbound port 25 is open'
+            : `Outbound port 25 appears blocked by ISP/firewall (${port25.error || 'connection failed'}). Verification will mark SMTP checks as unknown.`
+      },
+      smtpIdentity: {
+        heloHost: config.verifier.heloHost,
+        mailFrom: config.verifier.mailFrom,
+        isConfigured: config.verifier.identityConfigured,
+        warning: config.verifier.identityConfigured
+          ? null
+          : 'VERIFY_HELO_HOST or VERIFY_MAIL_FROM is unset in .env. Accuracy will be reduced.'
       },
       publicServer: {
         baseUrl: publicBaseUrl,
@@ -123,12 +138,28 @@ export function createAdminServer(options = {}) {
   // ==========================================
   // MODULE 1: EMAIL VERIFIER APIS
   // ==========================================
-  fastify.post('/api/verify', async (request, reply) => {
+  fastify.post('/api/verify', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['email'],
+        properties: {
+          email: { type: 'string', minLength: 3 }
+        }
+      }
+    }
+  }, async (request, reply) => {
     const { email } = request.body || {};
     if (!email) return reply.status(400).send({ error: 'Email is required' });
 
     const result = await verifyEmail(email);
     return reply.send(result);
+  });
+
+  fastify.get('/api/verify/retries', async (request, reply) => {
+    const db = getDb();
+    const rows = db.prepare('SELECT * FROM verification_retries ORDER BY id DESC LIMIT 50').all();
+    return reply.send(rows);
   });
 
   // SSE Bulk verification stream
@@ -619,6 +650,19 @@ if (process.argv[1] && process.argv[1].endsWith('admin.js')) {
   startEngine(config.scheduler.intervalMs);
   startReplyPoller(120000);
   startWarmupRunner(300000);
+
+  // 4.4 Port 25 background check at startup and every 15 minutes
+  detectPort25Availability().catch(() => {});
+  const port25Timer = setInterval(() => {
+    detectPort25Availability().catch(() => {});
+  }, 15 * 60 * 1000);
+  port25Timer.unref();
+
+  // 4.8 Greylist retry processor
+  const retryTimer = setInterval(() => {
+    runGreylistRetryTick(verifyEmail).catch(() => {});
+  }, 60 * 1000);
+  retryTimer.unref();
 
   const shutdown = async () => {
     console.log('Shutting down MailCheck background services...');
