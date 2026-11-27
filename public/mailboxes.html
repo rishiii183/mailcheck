@@ -40,6 +40,40 @@
       <span>ℹ️ <strong>Warm-up Transparency:</strong> MailCheck uses an internal peer warm-up exchange between your connected mailboxes. While this establishes authentic sender history and gradual ramp-up, it is no guarantee against spam filters. Warm-up never replaces clean verified lists, relevant copy, and conservative volume.</span>
     </div>
 
+    <!-- Warm-up Pool Status Card (5.5 & 5.7) -->
+    <div id="warmupPoolWarning" class="banner banner-error" style="display:none; margin-bottom: 20px;">
+      <span id="warmupPoolWarningText">⚠️ <strong>Warm-up Pool Alert:</strong> Warm-up requires at least 2 active mailboxes in 'warming' status. Currently too small to exchange peer mail.</span>
+    </div>
+
+    <div class="card" style="margin-bottom: 20px;">
+      <div class="card-title" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>🔥 Warm-up Pool & Daily Progress</span>
+        <span id="warmupPoolBadge" class="badge badge-success">Pool Active</span>
+      </div>
+      <div class="kpi-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
+        <div class="kpi-card">
+          <div class="kpi-label">Today's Planned vs Sent</div>
+          <div class="kpi-value" id="warmupTodayProgress">0 / 0</div>
+          <div class="kpi-sub" id="warmupSentSub">0 sent today</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Next Scheduled Send</div>
+          <div class="kpi-value" id="warmupNextSend" style="font-size: 16px; padding-top: 4px;">--</div>
+          <div class="kpi-sub" id="warmupWindowSub">Window: 09:00 - 18:00</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Active Warming Pool</div>
+          <div class="kpi-value" id="warmupPoolCount">0</div>
+          <div class="kpi-sub" id="warmupPoolSub">Mailboxes connected</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Last Error</div>
+          <div class="kpi-value" id="warmupLastError" style="font-size: 14px; color: var(--text-secondary); word-break: break-all;">None</div>
+          <div class="kpi-sub" id="warmupErrorSub">No delivery issues</div>
+        </div>
+      </div>
+    </div>
+
     <!-- Mailboxes Table -->
     <div class="card">
       <div class="card-title">Connected Mailboxes</div>
@@ -208,7 +242,48 @@
     let activeMailboxId = null;
     let warmupChart = null;
 
+    async function loadWarmupStatus() {
+      try {
+        const res = await fetch('/api/warmup/status');
+        if (!res.ok) return;
+        const status = await res.json();
+
+        // 5.5 & 5.7 UI Card values
+        document.getElementById('warmupTodayProgress').textContent = `${status.today.sent} / ${status.today.planned}`;
+        document.getElementById('warmupSentSub').textContent = `${status.today.sent} sends recorded today`;
+
+        if (status.next_scheduled_send) {
+          const sendDate = new Date(status.next_scheduled_send);
+          document.getElementById('warmupNextSend').textContent = sendDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        } else {
+          document.getElementById('warmupNextSend').textContent = 'None pending';
+        }
+
+        document.getElementById('warmupPoolCount').textContent = status.pool.size;
+        document.getElementById('warmupLastError').textContent = status.last_error || 'None';
+        document.getElementById('warmupErrorSub').textContent = status.last_error ? 'Last failure recorded' : 'No delivery issues';
+
+        const poolBadge = document.getElementById('warmupPoolBadge');
+        const poolWarn = document.getElementById('warmupPoolWarning');
+        const poolWarnText = document.getElementById('warmupPoolWarningText');
+
+        if (!status.pool.ok) {
+          poolWarn.style.display = 'block';
+          poolWarnText.textContent = `⚠️ Warm-up Pool Alert: ${status.pool.message}`;
+          poolBadge.className = 'badge badge-warn';
+          poolBadge.textContent = `Pool Too Small (${status.pool.size}/2)`;
+        } else {
+          poolWarn.style.display = 'none';
+          poolBadge.className = 'badge badge-pass';
+          poolBadge.textContent = `Pool Active (${status.pool.size} mailboxes)`;
+        }
+      } catch (err) {
+        console.warn('Failed to load warmup status:', err);
+      }
+    }
+
     async function loadMailboxes() {
+      loadWarmupStatus();
       try {
         const res = await fetch('/api/mailboxes');
         const mailboxes = await res.json();

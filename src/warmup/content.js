@@ -77,6 +77,54 @@ for (const topic of TOPICS) {
 }
 
 /**
+ * 5.3 Rule: 40+ short natural business reply templates for warm-up threading
+ */
+export const REPLY_TEMPLATES = [
+  '{Hi|Hey},\n\n{Thanks for sending this over|Got it, thanks for the update}.\n\n{Everything looks good on my end|I have reviewed and agree with the approach}.\n\n{Talk soon|Best regards}!',
+  '{Hello|Hi},\n\n{Appreciate the quick follow-up|Thanks for letting me know}.\n\n{Let us proceed with the plan|Sounds like a great plan}.\n\n{Cheers|Thanks}',
+  '{Hey|Hi},\n\n{Looks solid to me|No issues from my perspective}.\n\n{Let me know once the next revision is ready|Will catch up at the next sync}.\n\n{Best|Regards}',
+  '{Hi|Hello},\n\n{Thanks for checking in|Good to hear from you}.\n\n{Tuesday afternoon works well for me|Wednesday morning is wide open on my calendar}.\n\n{Let us connect then|Looking forward to it}!',
+  '{Hi there|Hey},\n\n{I took a quick look at the details|Just went through the shared notes}.\n\n{Everything seems completely in order|All looks clear}.\n\n{Thanks again|Cheers}',
+  '{Hello|Hi},\n\n{Confirming receipt, thank you|Got your note, thanks}.\n\n{Will follow up if anything else comes up|Nothing more needed from our side for now}.\n\n{Best regards|Warmly}',
+  '{Hey|Hi},\n\n{Thanks for the clarification|That clears things up nicely}.\n\n{Let us push forward with this|I will update our team accordingly}.\n\n{Have a great afternoon|Talk soon}',
+  '{Hi|Hello},\n\n{Great work on getting this out so quickly|Really appreciate the fast turnaround}.\n\n{Let me review with the team and get back to you by tomorrow|Will review today}.\n\n{Best|Thanks}',
+  '{Hi|Hello},\n\n{Understood, thank you|Makes total sense}.\n\n{Let me know if you need any input from my side|Happy to assist if anything arises}.\n\n{Cheers|Regards}',
+  '{Hey there|Hi there},\n\n{Sounds like a good approach|Agreed on all points}.\n\n{Let us touch base early next week|Looking forward to catching up}.\n\n{Best|Take care}',
+  '{Hello|Hi},\n\n{Thanks for the heads up|Good to know, thank you}.\n\n{I will keep an eye out for the next update|Noted on our end}.\n\n{Best regards|Thanks}',
+  '{Hi|Hey},\n\n{Perfect, thank you|That works out nicely}.\n\n{See you at the upcoming sync|Talk to you soon}.\n\n{Cheers|Best}',
+  '{Hey|Hi},\n\n{Thanks for sharing this article|Very interesting read, thanks for passing along}.\n\n{Section two had some really insightful points|Definitely relevant to what we are building}.\n\n{Talk soon|Cheers}',
+  '{Hello|Hi},\n\n{Payment received and recorded on our side|Invoice matched and confirmed}.\n\n{Thanks for the prompt confirmation|Have a wonderful rest of your week}.\n\n{Sincerely|Best regards}',
+  '{Hi|Hello},\n\n{The countersigned document has been archived|All paperwork is in order}.\n\n{Looking forward to kicking things off|Let us know if you need anything else}.\n\n{Best|Warmly}',
+  '{Hey|Hi},\n\n{Calendar invite accepted|I have added this to my calendar}.\n\n{Looking forward to our conversation|Talk shortly}.\n\n{Cheers|Best}',
+  '{Hello|Hi},\n\n{Thanks for making the intro|Nice to meet you virtually}.\n\n{Would love to set up a brief chat next week|Looking forward to connecting}.\n\n{Best regards|Thanks}',
+  '{Hi|Hey},\n\n{Thanks for the feedback|I will implement those adjustments today}.\n\n{Will share the updated link as soon as ready|Thanks again for reviewing}.\n\n{Best|Cheers}',
+  '{Hey|Hi},\n\n{Looks great! No further changes needed from my side|All good here}.\n\n{Good luck with the launch|Excited to see this go live}.\n\n{Best|Talk soon}',
+  '{Hi|Hello},\n\n{Thanks for digging into this so thoroughly|Appreciate you looking into the details}.\n\n{I will let the rest of the team know|We are all aligned on this}.\n\n{Warm regards|Cheers}',
+  '{Hey|Hi},\n\n{Got it! Thanks for flagging this early|Good catch on that}.\n\n{I will adjust the numbers right away|Updated on our spreadsheet}.\n\n{Thanks|Best}',
+  '{Hello|Hi},\n\n{Checked the shared document and left a few thumbs up|Everything reads very well}.\n\n{Ready to send to the executive group|Let me know if you want one final pass}.\n\n{Best regards|Thanks}',
+  '{Hi|Hello},\n\n{I can do Thursday at 2 PM if that still works|How about Friday morning instead}?\n\n{Let me know which time slot fits your schedule better|Let me know if that works for you}.\n\n{Best|Cheers}',
+  '{Hey|Hi},\n\n{Thanks for running the numbers on this|The forecast looks very reasonable}.\n\n{Let us bring this up at Monday standup|Looking forward to discussing}.\n\n{Talk soon|Best}',
+  '{Hi|Hello},\n\n{Confirmed from my end|Approved on our side}.\n\n{Please proceed whenever ready|Thanks for coordinating}.\n\n{Best regards|Thanks}',
+  '{Hello|Hi},\n\n{Much appreciated! Have a restful weekend|Thanks, enjoy your week ahead}.\n\n{We will circle back on Monday|Talk next week}.\n\n{Cheers|Warmly}',
+  '{Hi|Hey},\n\n{Thanks for the update on the migration|Good to see things progressing smoothly}.\n\n{Ping me if you encounter any unexpected roadblocks|Happy to help unblock if needed}.\n\n{Best|Regards}',
+  '{Hey|Hi},\n\n{Sounds good to me|I agree with this recommendation}.\n\n{Let us take this offline and finalize over chat|Will ping you on Slack}.\n\n{Cheers|Best}',
+  '{Hi|Hello},\n\n{Received with thanks|Notes received}.\n\n{Will review over lunch and send any notes before EOD|Looking over this now}.\n\n{Talk soon|Best}',
+  '{Hello|Hi},\n\n{Everything is confirmed and scheduled|Room booked and link active}.\n\n{See you then|Looking forward to our chat}.\n\n{Best regards|Thanks}',
+  '{Hey|Hi},\n\n{Appreciate the update on the customer inquiry|Thanks for stepping in on that}.\n\n{Customer seems satisfied with the resolution|Great job handling that}.\n\n{Cheers|Best}',
+  '{Hi|Hello},\n\n{Thanks for sending over the slide deck|The new visual layout is much cleaner}.\n\n{Ready for the stakeholder review|Thanks for the extra polish}.\n\n{Best regards|Cheers}',
+  '{Hello|Hi},\n\n{Got the revised figures|Everything matches our internal records now}.\n\n{Thanks for sorting that out so quickly|Have a great day}.\n\n{Sincerely|Best}',
+  '{Hey|Hi},\n\n{Thanks for the heads-up on the schedule change|No problem at all on my end}.\n\n{Rescheduled on my calendar as well|See you then}.\n\n{Best|Cheers}',
+  '{Hi|Hello},\n\n{Just checked the staging environment|The new release candidate is performing well}.\n\n{Green light from QA to proceed to production|Great work all}.\n\n{Best regards|Thanks}',
+  '{Hey|Hi},\n\n{Thanks for reaching out! Looking forward to collaborating on this|Glad we connected}.\n\n{Will draft a shared outline for us to work from|Talk soon}.\n\n{Cheers|Best}',
+  '{Hello|Hi},\n\n{Thanks for the clarification on the milestone dates|Everything aligns with our roadmap}.\n\n{Keep us posted if anything shifts|Thanks for your diligence}.\n\n{Warm regards|Best}',
+  '{Hi|Hey},\n\n{Received! I will take ownership of this task|On it right away}.\n\n{Will send a confirmation once complete|Talk soon}.\n\n{Best|Thanks}',
+  '{Hey|Hi},\n\n{Looks complete and accurate|No gaps found}.\n\n{Ready for the auditor sign-off|Thanks for getting this compiled}.\n\n{Cheers|Best regards}',
+  '{Hi|Hello},\n\n{Thanks for following up on this thread|Good to have closure on this topic}.\n\n{Archiving on our side as well|Have a good one}!\n\n{Best|Thanks}',
+  '{Hello|Hi},\n\n{The feedback has been incorporated into the master copy|Draft is finalized}.\n\n{Thanks to everyone for the input|Talk soon}.\n\n{Best regards|Cheers}',
+  '{Hey|Hi},\n\n{All set! Let us know if you need any follow-up data|Ready when you are}.\n\n{Have a great rest of your day|Cheers}.\n\n{Best|Thanks}'
+];
+
+/**
  * Returns a rendered random business warm-up template
  * @returns {{ subject: string, body: string }}
  */
@@ -88,45 +136,16 @@ export function getRandomWarmupTemplate() {
   };
 }
 
+/**
+ * 5.3 Rule: Returns a rendered random short business reply template
+ * @returns {{ body: string }}
+ */
+export function getRandomReplyTemplate() {
+  const pick = REPLY_TEMPLATES[Math.floor(Math.random() * REPLY_TEMPLATES.length)];
+  return {
+    body: renderSpintax(pick)
+  };
+}
+
 export const getRandomTemplate = getRandomWarmupTemplate;
 export const WARMUP_TEMPLATES = BASE_TEMPLATES;
-
-/**
- * Optional hook to generate fresh text via LLM API if configured in .env
- */
-export async function generateFreshWarmupText(apiKey = process.env.LLM_API_KEY) {
-  if (!apiKey) {
-    return getRandomWarmupTemplate();
-  }
-
-  try {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: 'You are writing a short, authentic 2-3 sentence business email between professional colleagues about a casual work topic. Return JSON: { "subject": "...", "body": "..." }' },
-          { role: 'user', content: 'Generate a short casual business message.' }
-        ],
-        response_format: { type: 'json_object' }
-      })
-    });
-
-    if (res.ok) {
-      const json = await res.json();
-      const content = JSON.parse(json.choices[0].message.content);
-      return {
-        subject: content.subject,
-        body: content.body
-      };
-    }
-  } catch (err) {
-    // Fallback to local template
-  }
-
-  return getRandomWarmupTemplate();
-}

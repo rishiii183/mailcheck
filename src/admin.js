@@ -10,7 +10,7 @@ import { getPort25Status, detectPort25Availability } from './verifier/smtp.js';
 import { runGreylistRetryTick } from './verifier/retries.js';
 import { createMailbox, getMailboxById, listMailboxes, updateMailbox, deleteMailbox, testMailboxConnection } from './mailboxes/accounts.js';
 import { checkMailboxDns } from './mailboxes/dns-check.js';
-import { getMailboxHealth, getWarmupPlan } from './warmup/health.js';
+import { getMailboxHealth, getWarmupPlan, getWarmupPoolStatus } from './warmup/health.js';
 import { createCampaign, getCampaign, listCampaigns, updateCampaign, launchCampaign, getLaunchStatus, pauseCampaign, resumeCampaign, duplicateCampaign, deleteCampaign, previewStep } from './campaigns/sequence.js';
 import { getOverviewStats, getCampaignStats, getCampaignLeads, getLeadTimeline } from './stats/queries.js';
 import { listReplies, labelReply, markReplyHandled } from './campaigns/replies.js';
@@ -363,6 +363,47 @@ export function createAdminServer(options = {}) {
 
     const updated = updateMailbox(id, { status: newStatus });
     return reply.send(updated);
+  });
+
+  // 5.7 Warmup pool & delivery status summary
+  fastify.get('/api/warmup/status', {
+    schema: {
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            pool: {
+              type: 'object',
+              properties: {
+                ok: { type: 'boolean' },
+                size: { type: 'number' },
+                message: { type: 'string' }
+              }
+            },
+            today: {
+              type: 'object',
+              properties: {
+                planned: { type: 'number' },
+                sent: { type: 'number' }
+              }
+            },
+            last_error: { type: ['string', 'null'] },
+            next_scheduled_send: { type: ['string', 'null'] },
+            mailboxes: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true }
+            }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const status = getWarmupPoolStatus();
+      return reply.send(status);
+    } catch (err) {
+      return reply.status(500).send({ error: err.message });
+    }
   });
 
   // ==========================================

@@ -129,6 +129,51 @@ export function migrate(db) {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- Warmup Schedule (5.1)
+    CREATE TABLE IF NOT EXISTS warmup_schedule (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mailbox_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      send_at DATETIME NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'claimed', 'sent', 'failed'
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_warmup_sched_status_send ON warmup_schedule(status, send_at);
+    CREATE INDEX IF NOT EXISTS idx_warmup_sched_box_date ON warmup_schedule(mailbox_id, date);
+
+    -- Warmup Delivery Processing Jobs (5.2)
+    CREATE TABLE IF NOT EXISTS warmup_delivery_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      warmup_id TEXT NOT NULL,
+      sender_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+      partner_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+      original_subject TEXT,
+      original_message_id TEXT,
+      attempts INTEGER DEFAULT 0,
+      next_run_at DATETIME NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'completed', 'failed'
+      last_error TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_warmup_delivery_status_next ON warmup_delivery_jobs(status, next_run_at);
+
+    -- Warmup Threaded Reply Jobs (5.3)
+    CREATE TABLE IF NOT EXISTS warmup_reply_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      warmup_id TEXT NOT NULL,
+      from_mailbox_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+      to_mailbox_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+      in_reply_to TEXT NOT NULL,
+      references_header TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      thread_depth INTEGER DEFAULT 1,
+      scheduled_at DATETIME NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'sent', 'failed'
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_warmup_reply_status_sched ON warmup_reply_jobs(status, scheduled_at);
+
     -- Lists of leads
     CREATE TABLE IF NOT EXISTS lists (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

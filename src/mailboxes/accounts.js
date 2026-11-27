@@ -250,7 +250,8 @@ export function updateMailbox(id, updates) {
     fields.push('status = ?');
     values.push(updates.status);
     if (updates.status === 'warming' && !existing.warmup_start_date) {
-      fields.push('warmup_start_date = CURRENT_TIMESTAMP');
+      fields.push('warmup_start_date = ?');
+      values.push(new Date().toISOString());
     }
   }
   if (updates.daily_warmup_target !== undefined) {
